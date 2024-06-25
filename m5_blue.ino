@@ -5,6 +5,23 @@
 BluetoothA2DPSink a2dp_sink;
 bool bypass = false;
 
+#define XSTR(x) STR(x)
+#define STR(x) #x
+
+#ifdef A2DP_I2S_AUDIOTOOLS
+#pragma message "A2DP_I2S_AUDIOTOOLS is set"
+#else
+#pragma message "A2DP_I2S_AUDIOTOOLS is not set" // here
+#endif
+
+#ifdef A2DP_LEGACY_I2S_SUPPORT
+#pragma message "A2DP_LEGACY_I2S_SUPPORT is set" // here
+#else
+#pragma message "A2DP_LEGACY_I2S_SUPPORT is not set"
+#endif
+
+#pragma message "ESP_IDF_VERSION = " XSTR(ESP_IDF_VERSION) // 4.4.6-dirty
+
 void setup() {
   M5.begin(true, true, true, true);
   a2dp_sink.start("AudiiSion");
