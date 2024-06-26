@@ -238,6 +238,9 @@ class BluetoothA2DPSink : public BluetoothA2DPCommon {
   virtual void set_raw_stream_reader(void (*callBack)(const uint8_t *,
                                                       uint32_t));
 
+  virtual void set_raw_stream_reader_writer(void (*callBack)(uint8_t *,
+                                                             uint32_t));
+
   /// Define callback which is called when we receive data
   virtual void set_on_data_received(void (*callBack)());
 
@@ -405,6 +408,7 @@ class BluetoothA2DPSink : public BluetoothA2DPCommon {
   void (*data_received)() = nullptr;
   void (*stream_reader)(const uint8_t *, uint32_t) = nullptr;
   void (*raw_stream_reader)(const uint8_t *, uint32_t) = nullptr;
+  void (*raw_stream_reader_writer)(uint8_t *, uint32_t) = nullptr;
   void (*avrc_connection_state_callback)(bool connected) = nullptr;
   void (*avrc_metadata_callback)(uint8_t, const uint8_t *) = nullptr;
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 0, 0)

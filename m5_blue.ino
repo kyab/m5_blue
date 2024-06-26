@@ -22,8 +22,11 @@ bool bypass = false;
 
 #pragma message "ESP_IDF_VERSION = " XSTR(ESP_IDF_VERSION) // 4.4.6-dirty
 
+void audio_callback(uint8_t *data, uint32_t len) { data[0] = 0; }
+
 void setup() {
   M5.begin(true, true, true, true);
+  a2dp_sink.set_raw_stream_reader_writer(audio_callback);
   a2dp_sink.start("AudiiSion");
   // a2dp_sink.set_stream_reader(read_data_stream, true);
   M5.Lcd.setTextSize(2);
