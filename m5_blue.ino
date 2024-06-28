@@ -22,7 +22,16 @@ bool bypass = false;
 
 #pragma message "ESP_IDF_VERSION = " XSTR(ESP_IDF_VERSION) // 4.4.6-dirty
 
-void audio_callback(uint8_t *data, uint32_t len) { data[0] = 0; }
+void audio_callback(int16_t *data, uint32_t len) { 
+  //data is interleaved stereo with 16bit samples each
+  for (int i = 0; i < len / 2; i++) {
+    int16_t *left = &data[i * 2];
+    int16_t *right = &data[i * 2 + 1];
+    float rightf = *right;
+    rightf *= 0.3;
+    *right = static_cast<int16_t>(rightf);
+  }
+}
 
 void setup() {
   M5.begin(true, true, true, true);
