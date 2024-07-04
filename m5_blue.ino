@@ -25,26 +25,26 @@ bool bypass = false;
 bool g_effect_right = false;
 bool g_effect_left = false;
 
-void audio_callback(int16_t *data, uint32_t len) { 
-  //data is interleaved stereo with 16bit samples each
+void audio_callback(int16_t *data, uint32_t len) {
+  // data is interleaved stereo with 16bit samples each
   for (int i = 0; i < len / 2; i++) {
     int16_t *left = &data[i * 2];
     int16_t *right = &data[i * 2 + 1];
-    if (g_effect_right){
+    if (g_effect_right) {
       float rightf = *right;
       rightf *= 0.3;
       *right = static_cast<int16_t>(rightf);
     }
-    if (g_effect_left){
+    if (g_effect_left) {
       *left = 0;
     }
   }
 }
 
-//dual button:
-// https://docs.m5stack.com/en/unit/dual_button
+// dual button connected to Port.B
+//  https://docs.m5stack.com/en/unit/dual_button
 #define DUAL_BUTTON_BLUE 36
-#define DUAL_BUTTON_RED  26
+#define DUAL_BUTTON_RED 26
 
 void setup() {
   M5.begin(true, true, true, true);
@@ -86,16 +86,15 @@ void loop() {
     intCnt = 100;
   }
 
-  if (digitalRead(DUAL_BUTTON_BLUE) == HIGH){
+  if (digitalRead(DUAL_BUTTON_BLUE) == HIGH) {
     g_effect_right = true;
-  }else{
+  } else {
     g_effect_right = false;
   }
 
-  if (digitalRead(DUAL_BUTTON_RED) == HIGH){
+  if (digitalRead(DUAL_BUTTON_RED) == HIGH) {
     g_effect_left = true;
-  }else{
+  } else {
     g_effect_left = false;
   }
-
 }
