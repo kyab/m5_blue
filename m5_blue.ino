@@ -39,6 +39,7 @@ void audio_callback(int16_t *data, uint32_t len) {
       *left = 0;
     }
   }
+  Serial.println("audio_callback");
 }
 
 // dual button connected to Port.B
@@ -51,7 +52,7 @@ void setup() {
   pinMode(DUAL_BUTTON_BLUE, INPUT);
   pinMode(DUAL_BUTTON_RED, INPUT);
   a2dp_sink.set_raw_stream_reader_writer(audio_callback);
-  a2dp_sink.start("AudiiSion");
+  a2dp_sink.start("M5Blue");
   // a2dp_sink.set_stream_reader(read_data_stream, true);
   M5.Lcd.setTextSize(2);
   M5.Lcd.print("\nAudiiSion Sound Lab.\n");
@@ -80,7 +81,7 @@ void loop() {
       } else {
         M5.Lcd.print("OFF");
       }
-      a2dp_sink.start("AudiiSion");
+      a2dp_sink.start("M5Blue");
       delay(200);
     }
     intCnt = 100;
