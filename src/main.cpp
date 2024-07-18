@@ -2,6 +2,10 @@
 
 #include "BluetoothA2DPSink.h"
 #include <M5Core2.h>
+#include <RingBuffer.hpp>
+
+RingBufferInterleaved *g_ring = nullptr;
+
 BluetoothA2DPSink a2dp_sink;
 bool bypass = false;
 
@@ -25,9 +29,9 @@ bool bypass = false;
 bool g_effect_right = false;
 bool g_effect_left = false;
 
-void audio_callback(int16_t *data, uint32_t len) {
+void audio_callback(int16_t *data, uint32_t sample_num) {
   // data is interleaved stereo with 16bit samples each
-  for (int i = 0; i < len / 2; i++) {
+  for (int i = 0; i < sample_num; i++) {
     int16_t *left = &data[i * 2];
     int16_t *right = &data[i * 2 + 1];
     if (g_effect_right) {
@@ -62,6 +66,10 @@ void setup() {
   M5.Lcd.setTextSize(3);
   M5.Lcd.setCursor(0, 100);
   M5.Lcd.print("ON ");
+
+  Serial.println("setup");
+  g_ring = new RingBufferInterleaved();
+
   delay(1000);
 }
 
