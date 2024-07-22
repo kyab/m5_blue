@@ -37,8 +37,11 @@ public:
     int32_t new_read_pos = static_cast<int32_t>(_read_pos) + sample_num;
     if (new_read_pos < 0) {
       new_read_pos += RING_BUFFER_SAMPLE_NUM;
+    } else if (new_read_pos >= RING_BUFFER_SAMPLE_NUM) {
+      new_read_pos -= RING_BUFFER_SAMPLE_NUM;
     }
-    // TODO else
+
+    _read_pos = static_cast<size_t>(new_read_pos);
   }
 
 private:

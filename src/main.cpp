@@ -1,7 +1,6 @@
 #include <M5Core2.h>
 
 #include "BluetoothA2DPSink.h"
-#include <M5Core2.h>
 #include <RingBuffer.hpp>
 
 RingBufferInterleaved *g_ring = nullptr;
