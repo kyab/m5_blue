@@ -1,7 +1,7 @@
 #include <cstddef>
 #include <cstdint>
 
-constexpr size_t RING_BUFFER_SAMPLE_NUM = 44100 * 30;
+constexpr size_t RING_BUFFER_SAMPLE_NUM = 44100 * 10;
 constexpr size_t RING_BUFFER_SIZE = RING_BUFFER_SAMPLE_NUM * 2;
 
 class RingBufferInterleaved {

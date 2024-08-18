@@ -74,8 +74,11 @@ bool BluetoothA2DPOutputLegacy::begin() {
 #if A2DP_LEGACY_I2S_SUPPORT
   ESP_LOGI(BT_AV_TAG, "%s", __func__);
   // setup i2s
-  if (i2s_driver_install(i2s_port, &i2s_config, 0, NULL) != ESP_OK) {
-    ESP_LOGE(BT_AV_TAG, "i2s_driver_install failed");
+
+  esp_err_t err = i2s_driver_install(i2s_port, &i2s_config, 0, NULL);
+
+  if (err != ESP_OK) {
+    ESP_LOGE(BT_AV_TAG, "i2s_driver_install failed with 0x%X", err);
     rc = false;
   }
 

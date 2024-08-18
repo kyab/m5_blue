@@ -1,11 +1,15 @@
 #include <M5Core2.h>
+// #include <driver/i2s.h>
+
+#include "AudioTools.h"
 
 #include "BluetoothA2DPSink.h"
 #include <RingBuffer.hpp>
 
 RingBufferInterleaved *g_ring = nullptr;
 
-BluetoothA2DPSink a2dp_sink;
+I2SStream i2s;
+BluetoothA2DPSink a2dp_sink(i2s);
 bool bypass = false;
 
 #define XSTR(x) STR(x)
@@ -42,7 +46,13 @@ void audio_callback(int16_t *data, uint32_t sample_num) {
       *left = 0;
     }
   }
-  Serial.println("audio_callback");
+
+  static uint32_t processed_samples = 0;
+  processed_samples += sample_num;
+  if (processed_samples >= 44100) {
+    processed_samples = 0;
+    Serial.println("audio_callback");
+  }
 }
 
 // dual button connected to Port.B
@@ -51,11 +61,9 @@ void audio_callback(int16_t *data, uint32_t sample_num) {
 #define DUAL_BUTTON_RED 26
 
 void setup() {
-  M5.begin(true, true, true, true);
+  M5.begin(true, false, true, true);
   pinMode(DUAL_BUTTON_BLUE, INPUT);
   pinMode(DUAL_BUTTON_RED, INPUT);
-  a2dp_sink.set_raw_stream_reader_writer(audio_callback);
-  a2dp_sink.start("M5Blue");
   // a2dp_sink.set_stream_reader(read_data_stream, true);
   M5.Lcd.setTextSize(2);
   M5.Lcd.print("\nAudiiSion Sound Lab.\n");
@@ -66,8 +74,27 @@ void setup() {
   M5.Lcd.setCursor(0, 100);
   M5.Lcd.print("ON ");
 
+  esp_log_level_set("*", ESP_LOG_INFO);
+
   Serial.println("setup");
+  delay(1000);
+  Serial.println("setup2");
+  delay(100);
   g_ring = new RingBufferInterleaved();
+  Serial.println("setup3");
+  delay(100);
+  a2dp_sink.set_raw_stream_reader_writer(audio_callback);
+  Serial.println("setup4");
+  delay(100);
+  auto cfg = i2s.defaultConfig();
+  cfg.pin_bck = 26;
+  cfg.pin_ws = 25;
+  cfg.pin_data = 22;
+  i2s.begin(cfg);
+  
+  a2dp_sink.start("M5Blue");
+
+  ESP_LOGI("main", "Available Heap: %zu", esp_get_free_heap_size());
 
   delay(1000);
 }
@@ -88,7 +115,7 @@ void loop() {
       } else {
         M5.Lcd.print("OFF");
       }
-      a2dp_sink.start("M5Blue");
+      // a2dp_sink.start("M5Blue");
       delay(200);
     }
     intCnt = 100;

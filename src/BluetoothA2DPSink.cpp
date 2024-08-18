@@ -169,9 +169,12 @@ void BluetoothA2DPSink::start(const char *name) {
 void BluetoothA2DPSink::init_i2s() {
   ESP_LOGI(BT_AV_TAG, "init_i2s");
   if (is_output) {
+    ESP_LOGI(BT_AV_TAG, "in init_i2s, callin out->begin()");
     out->begin();
+    ESP_LOGI(BT_AV_TAG, "in init_i2s, callin out->begin() done");
     player_init = false;
     is_i2s_active = true;
+    ESP_LOGI(BT_AV_TAG, "in init_i2s, out");
   }
 }
 
@@ -1016,7 +1019,7 @@ void BluetoothA2DPSink::app_a2d_callback(esp_a2d_cb_event_t event,
 }
 
 void BluetoothA2DPSink::audio_data_callback(const uint8_t *data, uint32_t len) {
-  ESP_LOGD(BT_AV_TAG, "%s", __func__);
+  ESP_LOGV(BT_AV_TAG, "%s", __func__);
 
   // swap left and right channels
   if (swap_left_right) {
@@ -1038,7 +1041,7 @@ void BluetoothA2DPSink::audio_data_callback(const uint8_t *data, uint32_t len) {
   volume_control()->update_audio_data((Frame *)data, len / 4);
 
   if (raw_stream_reader_writer != nullptr) {
-    ESP_LOGD(BT_AV_TAG, "raw_stream_reader_writer");
+    ESP_LOGV(BT_AV_TAG, "raw_stream_reader_writer");
     (*raw_stream_reader_writer)(
         reinterpret_cast<int16_t *>(const_cast<uint8_t *>(data)), len / 4);
   }
