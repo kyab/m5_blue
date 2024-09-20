@@ -39,7 +39,7 @@ void audio_callback(int16_t *data, uint32_t sample_num) {
     int16_t *right = &data[i * 2 + 1];
     if (g_effect_right) {
       float rightf = *right;
-      rightf *= 0.3;
+      rightf *= 0.1;
       *right = static_cast<int16_t>(rightf);
     }
     if (g_effect_left) {
@@ -57,8 +57,8 @@ void audio_callback(int16_t *data, uint32_t sample_num) {
 
 // dual button connected to Port.B
 //  https://docs.m5stack.com/en/unit/dual_button
-#define DUAL_BUTTON_BLUE 36
-#define DUAL_BUTTON_RED 26
+#define DUAL_BUTTON_BLUE 36 //effect right
+#define DUAL_BUTTON_RED 26  //effect left
 
 void setup() {
   M5.begin(true, false, true, true);
@@ -87,9 +87,16 @@ void setup() {
   Serial.println("setup4");
   delay(100);
   auto cfg = i2s.defaultConfig();
-  cfg.pin_bck = 26;
-  cfg.pin_ws = 25;
-  cfg.pin_data = 22;
+
+  //Internal speaker
+  cfg.pin_bck = 12;
+  cfg.pin_ws = 0;
+  cfg.pin_data = 2;
+  M5.Axp.SetSpkEnable(true);
+
+  // cfg.pin_bck = 26;
+  // cfg.pin_ws = 25;
+  // cfg.pin_data = 22;
   i2s.begin(cfg);
   
   a2dp_sink.start("M5Blue");
@@ -121,14 +128,20 @@ void loop() {
     intCnt = 100;
   }
 
-  if (digitalRead(DUAL_BUTTON_BLUE) == HIGH) {
-    g_effect_right = true;
+  if (digitalRead(DUAL_BUTTON_BLUE) == LOW) {
+    if (!g_effect_right){
+      ESP_LOGI("main", "Effect Right");
+      g_effect_right = true;
+    }
   } else {
     g_effect_right = false;
   }
 
-  if (digitalRead(DUAL_BUTTON_RED) == HIGH) {
-    g_effect_left = true;
+  if (digitalRead(DUAL_BUTTON_RED) == LOW) {
+    if (!g_effect_left){
+      ESP_LOGI("main", "Effect Left");
+      g_effect_left = true;
+    }
   } else {
     g_effect_left = false;
   }
