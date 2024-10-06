@@ -37,14 +37,19 @@ void audio_callback(int16_t *data, uint32_t sample_num) {
   for (int i = 0; i < sample_num; i++) {
     int16_t *left = &data[i * 2];
     int16_t *right = &data[i * 2 + 1];
-    if (g_effect_right) {
-      float rightf = *right;
-      rightf *= 0.1;
-      *right = static_cast<int16_t>(rightf);
-    }
-    if (g_effect_left) {
-      *left = 0;
-    }
+
+    float rightf = *right;
+    rightf *= 0.3;
+    *right = static_cast<int16_t>(rightf);
+
+    // if (g_effect_right) {
+    //   float rightf = *right;
+    //   rightf *= 0.1;
+    //   *right = static_cast<int16_t>(rightf);
+    // }
+    // if (g_effect_left) {
+    //   *left = 0;
+    // }
   }
 
   static uint32_t processed_samples = 0;
@@ -89,16 +94,17 @@ void setup() {
   auto cfg = i2s.defaultConfig();
 
   //Internal speaker
-  cfg.pin_bck = 12;
-  cfg.pin_ws = 0;
-  cfg.pin_data = 2;
-  M5.Axp.SetSpkEnable(true);
+  // cfg.pin_bck = 12;
+  // cfg.pin_ws = 0;
+  // cfg.pin_data = 2;
+  // M5.Axp.SetSpkEnable(true);
+  i2s.end();
+  a2dp_sink.stop();
 
-  // cfg.pin_bck = 26;
-  // cfg.pin_ws = 25;
-  // cfg.pin_data = 22;
+  cfg.pin_bck = 26;
+  cfg.pin_ws = 25;
+  cfg.pin_data = 22;
   i2s.begin(cfg);
-  
   a2dp_sink.start("M5Blue");
 
   ESP_LOGI("main", "Available Heap: %zu", esp_get_free_heap_size());
@@ -141,6 +147,7 @@ void loop() {
     if (!g_effect_left){
       ESP_LOGI("main", "Effect Left");
       g_effect_left = true;
+      a2dp_sink.next();
     }
   } else {
     g_effect_left = false;
