@@ -98,9 +98,11 @@ void setup() {
   // cfg.pin_ws = 0;
   // cfg.pin_data = 2;
   // M5.Axp.SetSpkEnable(true);
-  i2s.end();
-  a2dp_sink.stop();
 
+
+  //External speaker
+  i2s.end();
+  M5.Axp.SetSpkEnable(false);
   cfg.pin_bck = 26;
   cfg.pin_ws = 25;
   cfg.pin_data = 22;
