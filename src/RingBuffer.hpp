@@ -15,6 +15,8 @@ public:
       _buffer[_write_pos * 2 + 1] = buffer[i * 2 + 1];
       _write_pos++;
       if (_write_pos >= RING_BUFFER_SAMPLE_NUM) {
+        Serial.println("RingBufferInterleaved: write_pos overflow");
+        Serial.println(_write_pos);
         _write_pos = 0;
       }
     }
@@ -26,6 +28,8 @@ public:
       buffer[i * 2 + 1] = _buffer[_read_pos * 2 + 1];
       _read_pos++;
       if (_read_pos >= RING_BUFFER_SAMPLE_NUM) {
+        Serial.println("RingBufferInterleaved: read_pos overflow");
+        Serial.println(_read_pos);
         _read_pos = 0;
       }
     }

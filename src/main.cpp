@@ -29,8 +29,8 @@ bool bypass = false;
 
 #pragma message "ESP_IDF_VERSION = " XSTR(ESP_IDF_VERSION) // 4.4.6-dirty
 
-bool g_effect_right = false;
-bool g_effect_left = false;
+bool g_effect_blue = false;
+bool g_effect_red = false;
 
 void audio_callback(int16_t *data, uint32_t sample_num) {
   // data is interleaved stereo with 16bit samples each
@@ -38,10 +38,11 @@ void audio_callback(int16_t *data, uint32_t sample_num) {
     int16_t *left = &data[i * 2];
     int16_t *right = &data[i * 2 + 1];
 
-    float rightf = *right;
-    rightf *= 0.3;
-    *right = static_cast<int16_t>(rightf);
-
+    if (g_effect_blue) {
+      float leftf = *left;
+      leftf *= 0.3;
+      *left = static_cast<int16_t>(leftf);
+    }
     // if (g_effect_right) {
     //   float rightf = *right;
     //   rightf *= 0.1;
@@ -50,6 +51,13 @@ void audio_callback(int16_t *data, uint32_t sample_num) {
     // if (g_effect_left) {
     //   *left = 0;
     // }
+  }
+
+  if (g_effect_red) {
+    g_ring->storeSamples(data, sample_num);
+    g_ring->readSamplesTo(data, sample_num);
+  } else {
+    g_ring->storeSamples(data, sample_num);
   }
 
   static uint32_t processed_samples = 0;
@@ -65,8 +73,12 @@ void audio_callback(int16_t *data, uint32_t sample_num) {
 #define DUAL_BUTTON_BLUE 36 //effect right
 #define DUAL_BUTTON_RED 26  //effect left
 
+// dual button connected to Port.A (I2C should be disabled)
+#define DUAL_BUTTON_BLUE 33 // effect blue
+#define DUAL_BUTTON_RED 32  // effect red
+
 void setup() {
-  M5.begin(true, false, true, true);
+  M5.begin(true/*LCD*/, false/*SD*/, true/*Serial*/, false/*I2C*/);
   pinMode(DUAL_BUTTON_BLUE, INPUT);
   pinMode(DUAL_BUTTON_RED, INPUT);
   // a2dp_sink.set_stream_reader(read_data_stream, true);
@@ -137,21 +149,30 @@ void loop() {
   }
 
   if (digitalRead(DUAL_BUTTON_BLUE) == LOW) {
-    if (!g_effect_right){
-      ESP_LOGI("main", "Effect Right");
-      g_effect_right = true;
+    if (!g_effect_blue){
+      ESP_LOGI("main", "Effect Blue");
     }
+    g_effect_blue = true;
   } else {
-    g_effect_right = false;
+    if (g_effect_blue){
+      ESP_LOGI("main", "Effect Blue Off");
+      g_effect_blue = false;
+    }
+    g_effect_blue = false;
   }
 
   if (digitalRead(DUAL_BUTTON_RED) == LOW) {
-    if (!g_effect_left){
-      ESP_LOGI("main", "Effect Left");
-      g_effect_left = true;
-      a2dp_sink.next();
+    if (!g_effect_red){
+      ESP_LOGI("main", "Effect Red");
+      g_ring->syncPositon();
+      g_ring->advanceReadPosition(-44100);
+      // a2dp_sink.next();
     }
+    g_effect_red = true;
   } else {
-    g_effect_left = false;
+    if (g_effect_red){
+      ESP_LOGI("main", "Effect Red Off");
+    }
+    g_effect_red = false;
   }
 }
