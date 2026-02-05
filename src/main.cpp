@@ -70,15 +70,15 @@ void audio_callback(int16_t *data, uint32_t sample_num) {
 
 // dual button connected to Port.B
 //  https://docs.m5stack.com/en/unit/dual_button
-#define DUAL_BUTTON_BLUE 36 //effect right
-#define DUAL_BUTTON_RED 26  //effect left
+// #define DUAL_BUTTON_BLUE 36 //effect right
+// #define DUAL_BUTTON_RED 26  //effect left
 
 // dual button connected to Port.A (I2C should be disabled)
 #define DUAL_BUTTON_BLUE 33 // effect blue
 #define DUAL_BUTTON_RED 32  // effect red
 
 void setup() {
-  M5.begin(true/*LCD*/, false/*SD*/, true/*Serial*/, false/*I2C*/);
+  M5.begin(true /*LCD*/, false /*SD*/, true /*Serial*/, false /*I2C*/);
   pinMode(DUAL_BUTTON_BLUE, INPUT);
   pinMode(DUAL_BUTTON_RED, INPUT);
   // a2dp_sink.set_stream_reader(read_data_stream, true);
@@ -105,19 +105,27 @@ void setup() {
   delay(100);
   auto cfg = i2s.defaultConfig();
 
-  //Internal speaker
-  // cfg.pin_bck = 12;
-  // cfg.pin_ws = 0;
-  // cfg.pin_data = 2;
-  // M5.Axp.SetSpkEnable(true);
+  // Internal speaker
+  //  cfg.pin_bck = 12;
+  //  cfg.pin_ws = 0;
+  //  cfg.pin_data = 2;
+  //  M5.Axp.SetSpkEnable(true);
 
+  // External speaker
+  // i2s.end();
+  // M5.Axp.SetSpkEnable(false);
+  // cfg.pin_bck = 26;
+  // cfg.pin_ws = 25;
+  // cfg.pin_data = 22;
+  // i2s.begin(cfg);
+  // a2dp_sink.start("M5Blue");
 
-  //External speaker
+  // Module Audio
   i2s.end();
   M5.Axp.SetSpkEnable(false);
-  cfg.pin_bck = 26;
-  cfg.pin_ws = 25;
-  cfg.pin_data = 22;
+  cfg.pin_bck = 19; // M5Bus:22, Core2 GPIO 19, I2S_BCK, SCLK/SCK
+  cfg.pin_ws = 27;  // M5Bus:21, Core2 GPIO 0, I2S_LRCK, WS
+  cfg.pin_data = 2; // M5Bus:23, Core2 GPIO 2, I2S_DOUT, SDATA
   i2s.begin(cfg);
   a2dp_sink.start("M5Blue");
 
@@ -149,12 +157,12 @@ void loop() {
   }
 
   if (digitalRead(DUAL_BUTTON_BLUE) == LOW) {
-    if (!g_effect_blue){
+    if (!g_effect_blue) {
       ESP_LOGI("main", "Effect Blue");
     }
     g_effect_blue = true;
   } else {
-    if (g_effect_blue){
+    if (g_effect_blue) {
       ESP_LOGI("main", "Effect Blue Off");
       g_effect_blue = false;
     }
@@ -162,7 +170,7 @@ void loop() {
   }
 
   if (digitalRead(DUAL_BUTTON_RED) == LOW) {
-    if (!g_effect_red){
+    if (!g_effect_red) {
       ESP_LOGI("main", "Effect Red");
       g_ring->syncPositon();
       g_ring->advanceReadPosition(-44100);
@@ -170,7 +178,7 @@ void loop() {
     }
     g_effect_red = true;
   } else {
-    if (g_effect_red){
+    if (g_effect_red) {
       ESP_LOGI("main", "Effect Red Off");
     }
     g_effect_red = false;
