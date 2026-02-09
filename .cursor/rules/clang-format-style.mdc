@@ -1,0 +1,20 @@
+---
+description: Follow project .clang-format when writing C/C++ code
+globs: "**/*.c,**/*.cpp,**/*.h,**/*.hpp"
+alwaysApply: false
+---
+
+# C/C++ Code Style (follow .clang-format)
+
+When generating or editing C/C++ code in this project, follow the style defined in the project root **`.clang-format`**. In particular:
+
+- **Indentation**: 4 spaces (no tabs). `UseTab: Never`, `IndentWidth: 4`.
+- **Braces**: Attach to the same line as the statement. `BreakBeforeBraces: Attach`.
+  - `void foo() {` / `if (x) {` / `for (...) {`
+- **Pointer style**: Do not change existing pointer alignment in a file. New code: use the same style already used in that file (e.g. `int* p` vs `int *p`). Project uses `DerivePointerAlignment: true`.
+- **Line length**: No hard limit (`ColumnLimit: 0`). Long lines are acceptable.
+- **Short blocks**: Single-line bodies like `if (x) return;` are allowed.
+- **Includes**: Do not reorder includes; keep existing order (`SortIncludes: false`).
+- **Empty lines**: At most one consecutive empty line; no leading empty lines in blocks.
+
+Before writing new C/C++ code, skim the existing file to match its pointer style and indentation. The canonical style is in `.clang-format` at the project root.

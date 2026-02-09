@@ -1,0 +1,25 @@
+# Match current project style: 4 spaces, attached braces, no column limit
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+
+# Braces on same line as function/if/for
+BreakBeforeBraces: Attach
+
+# No line length limit (current code has long lines)
+ColumnLimit: 0
+
+# Allow single-line blocks like "if (x) return;"
+AllowShortBlocksOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: WithoutElse
+
+# Keep existing pointer style per file (do not change * position)
+DerivePointerAlignment: true
+
+# Compact else
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+
+# Include order: no sorting (keep as-is)
+SortIncludes: false
