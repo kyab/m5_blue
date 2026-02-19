@@ -15,20 +15,32 @@
 #include "soc/io_mux_reg.h"
 #include "soc/gpio_periph.h"
 
-// Module Audio I2C pins
+// Pin assignment for: M5Stack Core2 + Module Audio + 2x Bottom stack.
+// References: docs.m5stack.com/en/core/core2, docs.m5stack.com/en/module/Module-Audio,
+//             docs.m5stack.com/en/base/m5go_bottom2 (Port B/C on Bottom).
+//
+// Core2 has only one Grove on the side: PORT.A (G32/G33). PORT.B (G26/G36) and PORT.C (G13/G14)
+// are brought out by the Bottom module(s), not on Core2 body.
+// Core2 internal: G1/G3 (USB serial), G21/G22 (I2C: Touch/RTC/IMU), G0/G2/G34 (NS4168/mic —
+//   we release with M5.Speaker.end() and use G0/G2/G34 for Module Audio I2S).
+// Core2 M-Bus: G36=pin4, G32/G33=pin19/20, G27/G19=pin21/22, G2/G0=pin23/24, G34=pin26.
+// Module Audio uses M-Bus: I2C 17/18 (G21/G22), I2S on 21,22,23,24,26 (G27,G19,G2,G0,G34). Does not use G36.
+// Bottom (e.g. M5GO Bottom2) exposes PORT.B (G26 DAC, G36 ADC) and PORT.C (G13/G14 UART).
 #define SYS_I2C_SDA_PIN 21
 #define SYS_I2C_SCL_PIN 22
 
-// Module Audio I2S pins
 #define SYS_I2S_MCLK_PIN 0
 #define SYS_I2S_SCLK_PIN 19
 #define SYS_I2S_LRCK_PIN 27
 #define SYS_I2S_DOUT_PIN 2
 #define SYS_I2S_DIN_PIN 34
 
-// Dual button connected to Port.A
+// Dual button: Core2 side PORT.A only (G32/G33)
 #define DUAL_BUTTON_BLUE 33
 #define DUAL_BUTTON_RED 32
+
+// Rotation angle unit (M5STACK-U005): connect to PORT.B (black, analog) on the Bottom module; G36 = ADC
+#define ROTATION_ANGLE_GPIO 36
 
 // Audio I2C device (for RGB LED, HP detect, etc.)
 AudioI2c device;
@@ -781,6 +793,23 @@ void loop() {
         ESP_LOGI("main", "Effect Red OFF");
         g_effect_red = false;
         device.setRGBLED(2, 0x00FF00); // Green LED
+    }
+
+    // Rotation angle unit (Grove B): read and dump at 5 Hz to avoid log flood
+    {
+        static uint32_t last_rotation_dump_ms = 0;
+        uint32_t now_ms = (uint32_t)millis();
+        if (now_ms - last_rotation_dump_ms >= 200) {
+            last_rotation_dump_ms = now_ms;
+            int raw = analogRead(ROTATION_ANGLE_GPIO);
+            int mV = analogReadMilliVolts(ROTATION_ANGLE_GPIO);
+            uint32_t angle = (uint32_t)mV * 360u / 2500u;
+            if (angle > 360u) angle = 360u;
+            ESP_LOGI("main", "Rotation raw=%d mV=%d angle=%lu", raw, mV, (unsigned long)angle);
+            M5.Display.setCursor(0, 220);
+            M5.Display.setTextColor(WHITE);
+            M5.Display.printf("Rotation: raw=%d mV=%d deg=%lu   ", raw, mV, (unsigned long)angle);
+        }
     }
 
     // Small delay to prevent tight loop
