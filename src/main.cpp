@@ -475,9 +475,21 @@ void setup() {
     pinMode(DUAL_BUTTON_BLUE, INPUT);
     pinMode(DUAL_BUTTON_RED, INPUT);
 
-    // Scan I2C bus
-    ESP_LOGI("main", "Scanning I2C bus...");
+    // Initialize I2C and IMMEDIATELY mute ES8388 to prevent pop on reset
+    // This is critical: ES8388 may have been left at high volume before MCU reset
+    ESP_LOGI("main", "Initializing I2C and quick-muting ES8388...");
     Wire.begin(SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN, 400000L);
+
+    // Quick mute ES8388 BEFORE anything else - this prevents reset pop
+    if (es8388.quickMute()) {
+        ESP_LOGI("main", "ES8388 quick mute OK (pop prevention)");
+    } else {
+        ESP_LOGW("main", "ES8388 quick mute failed (device may not be ready)");
+    }
+    startup_step("S03", "I2C_and_quickMute");
+
+    // Scan I2C bus for debugging
+    ESP_LOGI("main", "Scanning I2C bus...");
     for (int addr = 1; addr < 127; addr++) {
         Wire.beginTransmission(addr);
         uint8_t error = Wire.endTransmission();
@@ -485,7 +497,7 @@ void setup() {
             ESP_LOGI("main", "Found I2C device at address 0x%02X", addr);
         }
     }
-    startup_step("S03", "I2C_scan");
+    startup_step("S03b", "I2C_scan");
 
     // Initialize Module Audio I2C device
     ESP_LOGI("main", "Initializing AudioI2c device...");
@@ -503,51 +515,36 @@ void setup() {
     }
     startup_step("S04", "AudioI2c");
 
-    // ES8388 init: Pops are avoided by using a local patched Module-Audio (lib/Module-Audio):
-    // init() leaves DAC muted (DACCONTROL3=0x02) and Lout/Rout volume at 0; we unmute after SoftRamp in S07.
-    // Upstream init() does DACPOWER=0x3F then DACCONTROL3=0x00 (unmute), which causes two pops.
-    // Upstream setDACmute() is broken (reads ADCCONTROL1, writes DACCONTROL3) — we use direct I2C for DACCONTROL3.
-    ESP_LOGI("main", "Initializing ES8388 codec...");
+    // ES8388 init: Pop-safe initialization sequence
+    // init() leaves DAC muted with volume 0 and SoftRamp enabled.
+    // After init, we configure output, unmute, then gradually ramp up volume.
+    ESP_LOGI("main", "Initializing ES8388 codec (pop-safe sequence)...");
     if (!es8388.init()) {
         ESP_LOGE("main", "Failed to initialize ES8388!");
         M5.Display.setTextColor(RED);
         M5.Display.println("ES8388: FAILED!");
     } else {
-        ESP_LOGI("main", "ES8388 OK");
+        ESP_LOGI("main", "ES8388 init OK (muted, vol=0, SoftRamp=on)");
         M5.Display.setTextColor(GREEN);
         M5.Display.println("ES8388: OK");
     }
     startup_step("S05", "ES8388_init");
 
-    // Library bug: Module-Audio setDACmute() reads ES8388_ADCCONTROL1 (0x09) but writes
-    // ES8388_DACCONTROL3 (0x19), corrupting DACCONTROL3. Do not use setDACmute(); use direct I2C on DACCONTROL3.
-
-    // Temporary test: soft ramp on, mute off (unmute), volume 0. No mute toggle — set volume 0 and
-    // enable SoftRamp, then write DACCONTROL3 with SoftRamp set and Mute bit clear.
+    // Configure DAC output and format (still muted at volume 0)
     es8388.setDACOutput(DAC_OUTPUT_OUT1);
     es8388.setDACVolume(0);
     es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
     es8388.setSampleRate(SAMPLE_RATE_44K);
     startup_step("S06", "DAC_config_volume0");
 
-    // DACCONTROL3 (0x19): bit5 = DACSoftRamp, bit1 = DACMute. Set SoftRamp, clear Mute (unmute).
-    {
-        uint8_t reg25 = 0x00;
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL3);
-        Wire.endTransmission(false);
-        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
-            reg25 = Wire.read();
-        }
-        reg25 = (reg25 & ~0x02u) | 0x20u;  // clear Mute (bit1), set SoftRamp (bit5)
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL3);
-        Wire.write(reg25);
-        if (Wire.endTransmission() == 0) {
-            ESP_LOGI("main", "ES8388 DACCONTROL3=0x%02X (SoftRamp on, unmute, vol0)", reg25);
-        }
-    }
-    startup_step("S07", "DAC_SoftRamp");
+    // Enable SoftRamp with slowest ramp rate (0x03 = 8192 samples per step)
+    // This ensures volume changes are gradual to prevent pops
+    es8388.setSoftRamp(true, 0x03);
+
+    // Unmute DAC (still at volume 0, so no audio yet)
+    es8388.setDACMute(false);
+    ESP_LOGI("main", "ES8388: SoftRamp enabled, unmuted, volume=0");
+    startup_step("S07", "DAC_SoftRamp_unmute");
 
     // Configure MCLK output on GPIO0 (required for ES8388)
     ESP_LOGI("main", "Configuring MCLK output on GPIO0...");
