@@ -3,13 +3,22 @@
  *
  *SPDX-License-Identifier: MIT
  *
- * Local patch: init() first turns off DACPOWER and sets DAC Mute (DACCONTROL3 bit2) so that
- * re-init after reboot (ES8388 may still be on with volume 100) does not cause pops. Then
- * it configures DAC with SoftRamp, volume 0, and leaves DAC muted; DACPOWER is enabled last.
- * Application enables SoftRamp and unmutes after.
+ * Local patch: add a reset-safe DAC sequence and fix DAC mute bit handling.
  */
 
 #include "es8388.hpp"
+
+namespace {
+constexpr uint8_t kDacMuteBit               = 0x04;
+constexpr uint8_t kDacSoftRampBit           = 0x20;
+constexpr uint8_t kDacRampRateMask          = 0xC0;
+constexpr uint8_t kDacRampRateSlowest       = 0xC0;
+constexpr uint8_t kDacClickFreeBit          = 0x08;
+constexpr uint8_t kDacMutedSafeValue        = kDacRampRateSlowest | kDacSoftRampBit | kDacMuteBit;
+constexpr uint8_t kDacPowerAllOff           = 0xC0;
+constexpr uint8_t kDacDigitalVolumeMute     = 0xC0;
+constexpr uint8_t kDacResetRecoveryDelayMs  = 2;
+}  // namespace
 
 ES8388::ES8388(TwoWire* wire, uint8_t sda, uint8_t scl, uint32_t speed)
 {
@@ -71,10 +80,48 @@ uint8_t* ES8388::readAllReg()
     return reg;
 }
 
+bool ES8388::applyResetSafeDacState()
+{
+    bool res    = true;
+    uint8_t reg = 0;
+
+    // Reg.25: keep reserved bits, force mute + soft ramp + slowest ramp rate.
+    if (readBytes(ES8388_DACCONTROL3, reg)) {
+        reg = static_cast<uint8_t>((reg & ~(kDacRampRateMask | kDacSoftRampBit | kDacMuteBit)) | kDacMutedSafeValue);
+        res &= writeBytes(ES8388_DACCONTROL3, reg);
+    } else {
+        res &= writeBytes(ES8388_DACCONTROL3, kDacMutedSafeValue);
+    }
+
+    // Reg.28: enable click-free power up/down.
+    if (readBytes(ES8388_DACCONTROL6, reg)) {
+        reg |= kDacClickFreeBit;
+        res &= writeBytes(ES8388_DACCONTROL6, reg);
+    } else {
+        res &= writeBytes(ES8388_DACCONTROL6, kDacClickFreeBit);
+    }
+
+    // Pull both analog output gain and digital DAC gain to minimum as an extra guard.
+    res &= writeBytes(ES8388_DACCONTROL24, 0x00);
+    res &= writeBytes(ES8388_DACCONTROL25, 0x00);
+    res &= writeBytes(ES8388_DACCONTROL26, 0x00);
+    res &= writeBytes(ES8388_DACCONTROL27, 0x00);
+    res &= writeBytes(ES8388_DACCONTROL4, kDacDigitalVolumeMute);
+    res &= writeBytes(ES8388_DACCONTROL5, kDacDigitalVolumeMute);
+
+    // Disable DAC outputs immediately so warm-reset residual state cannot leak to speakers.
+    res &= writeBytes(ES8388_DACPOWER, kDacPowerAllOff);
+    delay(kDacResetRecoveryDelayMs);
+    return res;
+}
+
 bool ES8388::init()
 {
     bool res = true;
     /* INITIALIZATION (BASED ON ES8388 USER GUIDE EXAMPLE) */
+
+    // If ESP32 reset happened while codec stayed powered, force safe DAC state first.
+    res &= applyResetSafeDacState();
 
     // Set Chip to Slave
     res &= writeBytes(ES8388_MASTERMODE, 0x00);
@@ -110,12 +157,13 @@ bool ES8388::init()
     res &= writeBytes(ES8388_ADCCONTROL13, 0x06);
     res &= writeBytes(ES8388_ADCCONTROL14, 0xC3);
 
-    /* DAC setting: SoftRamp slowest, unmute explicit, volume 0; DACPOWER last so output is off until ready */
+    /* DAC setting: keep muted with SoftRamp slowest; DACPOWER enabled last */
     res &= writeBytes(ES8388_DACCONTROL1, 0x18);
     res &= writeBytes(ES8388_DACCONTROL2, 0x02);
-    res &= writeBytes(ES8388_DACCONTROL3, 0xE0);  // DACRampRate=11, SoftRamp=1, DACMute=0 (unmute)
+    res &= writeBytes(ES8388_DACCONTROL3, kDacMutedSafeValue);  // DACRampRate=11, SoftRamp=1, DACMute=1
     res &= writeBytes(ES8388_DACCONTROL4, 0x05);
     res &= writeBytes(ES8388_DACCONTROL5, 0x05);
+    res &= writeBytes(ES8388_DACCONTROL6, 0x08);  // ClickFree enabled
     res &= writeBytes(ES8388_DACCONTROL16, 0x00);
     res &= writeBytes(ES8388_DACCONTROL17, 0xd0);
     res &= writeBytes(ES8388_DACCONTROL18, 0x38);
@@ -194,13 +242,15 @@ bool ES8388::setDACOutput(es_dac_output_t output)
 // mute Output
 bool ES8388::setDACmute(bool mute)
 {
-    uint8_t _reg;
-    readBytes(ES8388_ADCCONTROL1, _reg);
+    uint8_t reg = 0;
     bool res = true;
-    if (mute)
-        res &= writeBytes(ES8388_DACCONTROL3, _reg | 0x02);
-    else
-        res &= writeBytes(ES8388_DACCONTROL3, _reg & ~(0x02));
+    res &= readBytes(ES8388_DACCONTROL3, reg);
+    if (mute) {
+        reg |= kDacMuteBit;
+    } else {
+        reg &= static_cast<uint8_t>(~kDacMuteBit);
+    }
+    res &= writeBytes(ES8388_DACCONTROL3, reg);
     return res;
 }
 

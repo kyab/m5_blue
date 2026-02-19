@@ -97,6 +97,7 @@ class ES8388 {
 public:
     ES8388(TwoWire* wire, uint8_t sda = -1, uint8_t scl = -1, uint32_t speed = 400000L);
     uint8_t* readAllReg();
+    bool applyResetSafeDacState();
     bool init();
     bool setMicGain(es_mic_gain_t gain);
     uint8_t getMicGain();

@@ -107,9 +107,9 @@ static inline int16_t dither_lsb() {
 // Set kPreBTTestCycles > 0 to run; 0 to skip and start BT immediately.
 // When running this test, DAC ramp is skipped (service_dac_volume_ramp + feed target=0) so we observe raw hardware.
 //
-// ES8388 soft mute: Module-Audio setDACmute(bool) uses DACCONTROL3 (Reg.25).
-// DAC Soft Ramp: datasheet Reg.25 (DAC Control 3, 0x19) = DACRampRate, DACSoftRamp, DACLeR, DACMute.
-// We enable DACSoftRamp (bit 5) via direct I2C after init; setDACmute() does not clear that bit.
+// ES8388 soft mute is DACCONTROL3 (Reg.25) bit2 (DACMute).
+// DAC soft ramp is DACCONTROL3 bit5 and DACRampRate bits7:6.
+// Keep SoftRamp enabled and only toggle DACMute when muting/unmuting.
 //
 // kPreBTTestUseGainRamp: 0 = switch sine/silence buffers (old). 1 = same sine, 2s gain 1->0->0->1 (no buffer switch).
 // When 1, i2s_feed_task logs immediately if ring buffer underrun (feed task starved).
@@ -451,6 +451,13 @@ void setup() {
     // Initialize M5Unified
     auto cfg = M5.config();
     M5.begin(cfg);
+
+    // Run reset-recovery clamp as early as possible:
+    // if ESP32 reset while codec stayed powered (DAC on, volume high, unmuted),
+    // force mute + minimum gain + DAC output off immediately.
+    Wire.begin(SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN, 400000L);
+    es8388.applyResetSafeDacState();
+
     startup_step("S01", "M5.begin");
 
     Serial.begin(115200);
@@ -503,10 +510,9 @@ void setup() {
     }
     startup_step("S04", "AudioI2c");
 
-    // ES8388 init: Pops are avoided by using a local patched Module-Audio (lib/Module-Audio):
-    // init() leaves DAC muted (DACCONTROL3=0x02) and Lout/Rout volume at 0; we unmute after SoftRamp in S07.
-    // Upstream init() does DACPOWER=0x3F then DACCONTROL3=0x00 (unmute), which causes two pops.
-    // Upstream setDACmute() is broken (reads ADCCONTROL1, writes DACCONTROL3) — we use direct I2C for DACCONTROL3.
+    // ES8388 init in local Module-Audio starts from reset-safe state:
+    // mute on + SoftRamp slowest + output gain minimum + DACPOWER off, then normal init.
+    // DAC is intentionally left muted after init; we unmute after audio format/volume setup.
     ESP_LOGI("main", "Initializing ES8388 codec...");
     if (!es8388.init()) {
         ESP_LOGE("main", "Failed to initialize ES8388!");
@@ -519,35 +525,18 @@ void setup() {
     }
     startup_step("S05", "ES8388_init");
 
-    // Library bug: Module-Audio setDACmute() reads ES8388_ADCCONTROL1 (0x09) but writes
-    // ES8388_DACCONTROL3 (0x19), corrupting DACCONTROL3. Do not use setDACmute(); use direct I2C on DACCONTROL3.
-
-    // Temporary test: soft ramp on, mute off (unmute), volume 0. No mute toggle — set volume 0 and
-    // enable SoftRamp, then write DACCONTROL3 with SoftRamp set and Mute bit clear.
+    // Keep output at minimum until all stream settings are stable.
     es8388.setDACOutput(DAC_OUTPUT_OUT1);
     es8388.setDACVolume(0);
     es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
     es8388.setSampleRate(SAMPLE_RATE_44K);
     startup_step("S06", "DAC_config_volume0");
 
-    // DACCONTROL3 (0x19): bit5 = DACSoftRamp, bit1 = DACMute. Set SoftRamp, clear Mute (unmute).
-    {
-        uint8_t reg25 = 0x00;
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL3);
-        Wire.endTransmission(false);
-        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
-            reg25 = Wire.read();
-        }
-        reg25 = (reg25 & ~0x02u) | 0x20u;  // clear Mute (bit1), set SoftRamp (bit5)
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL3);
-        Wire.write(reg25);
-        if (Wire.endTransmission() == 0) {
-            ESP_LOGI("main", "ES8388 DACCONTROL3=0x%02X (SoftRamp on, unmute, vol0)", reg25);
-        }
+    // Reg.25 bit2 controls DAC mute; clear only this bit and keep SoftRamp/ramp-rate unchanged.
+    if (!es8388.setDACmute(false)) {
+        ESP_LOGW("main", "Failed to unmute ES8388 DAC");
     }
-    startup_step("S07", "DAC_SoftRamp");
+    startup_step("S07", "DAC_unmute");
 
     // Configure MCLK output on GPIO0 (required for ES8388)
     ESP_LOGI("main", "Configuring MCLK output on GPIO0...");
