@@ -76,7 +76,7 @@ static const uint32_t kResumeRampSamples = 512; // ~11.6 ms at 44.1k stereo
 // When pausing, transition from data to silence causes a pop. Fade out over first N samples of silence.
 static const uint32_t kPauseFadeOutSamples = 1024; // ~23 ms (spread over multiple chunks)
 // When source sends silence (zeros), don't forward zeros to I2S (causes pop); replace with dither after short fade
-static const int kSilenceDataThreshold = 8;       // max abs sample to treat chunk as silence
+static const int kSilenceDataThreshold = 1;       // max abs sample to treat chunk as silence
 static const uint32_t kSilenceDataFadeSamples = 128;  // fade from last sample to dither over this many samples
 static RingbufHandle_t g_feed_ring = nullptr;
 static TaskHandle_t g_i2s_feed_task_handle = nullptr;
@@ -91,9 +91,10 @@ volatile uint32_t g_track_change_mute_left = 0;
 // Feed task sets g_dac_volume_target (0 or 100); loop() ramps via service_dac_volume_ramp().
 // When kPreBTTestCycles > 0 we skip DAC ramp so the test observes raw hardware (no mute/volume change).
 
-// DAC volume ramp: target set by feed task; loop() ramps current toward target via setDACVolume() to reduce pops
-volatile int g_dac_volume_target = 100;
-static int g_dac_volume_current = 100;
+// DAC volume ramp: target set by feed task; loop() ramps current toward target via setDACVolume() to reduce pops.
+// Start at 0; feed task sets target 100 when first real audio arrives to avoid startup pop.
+volatile int g_dac_volume_target = 0;
+static int g_dac_volume_current = 0;
 
 // Global LFSR for ±1 LSB dither (pre-BT and runtime). 32-bit Galois, polynomial 0x80200003, max period 2^32-1
 static uint32_t g_lfsr_state = 0xACE1u;
@@ -122,7 +123,7 @@ static const int kPreBTTestUseGainRamp = 1;  // 1 = gain-ramp test (2s full, 2s 
 void i2s_feed_task(void* arg);
 
 // Ramps g_dac_volume_current toward g_dac_volume_target; call from loop(). Skipped when kPreBTTestCycles > 0.
-static const int kDacVolumeRampStep = 3;
+static const int kDacVolumeRampStep = 20;
 void service_dac_volume_ramp() {
     if (kPreBTTestCycles > 0) return;
     int target = g_dac_volume_target;
@@ -143,6 +144,14 @@ static void debug_log(const char* hid, const char* msg, const char* data, int li
                   (unsigned long)millis(), hid, msg, data ? data : "{}", line);
 }
 #define DEBUG_LOG(hid, msg, data) debug_log(hid, msg, data, __LINE__)
+
+// Startup pop debugging: log step then delay so user can hear when pop occurs (step id in log).
+static const int kStartupStepDelayMs = 1000;
+static void startup_step(const char* step_id, const char* step_name) {
+    Serial.printf("{\"ts\":%lu,\"startup_step\":\"%s\",\"name\":\"%s\"}\n",
+                  (unsigned long)millis(), step_id, step_name);
+    delay(kStartupStepDelayMs);
+}
 // #endregion
 
 // Audio callback - process in-place then push to feed ring; library does NOT write to I2S
@@ -442,9 +451,11 @@ void setup() {
     // Initialize M5Unified
     auto cfg = M5.config();
     M5.begin(cfg);
+    startup_step("S01", "M5.begin");
 
     Serial.begin(115200);
     delay(1000);
+    startup_step("S02", "Serial.begin");
 
     // Reduce log level to avoid performance issues
     esp_log_level_set("*", ESP_LOG_INFO);
@@ -474,6 +485,7 @@ void setup() {
             ESP_LOGI("main", "Found I2C device at address 0x%02X", addr);
         }
     }
+    startup_step("S03", "I2C_scan");
 
     // Initialize Module Audio I2C device
     ESP_LOGI("main", "Initializing AudioI2c device...");
@@ -489,8 +501,12 @@ void setup() {
         device.setRGBBrightness(50);
         device.setRGBLED(0, 0x0000FF); // Blue - waiting
     }
+    startup_step("S04", "AudioI2c");
 
-    // Initialize ES8388 codec
+    // ES8388 init: Pops are avoided by using a local patched Module-Audio (lib/Module-Audio):
+    // init() leaves DAC muted (DACCONTROL3=0x02) and Lout/Rout volume at 0; we unmute after SoftRamp in S07.
+    // Upstream init() does DACPOWER=0x3F then DACCONTROL3=0x00 (unmute), which causes two pops.
+    // Upstream setDACmute() is broken (reads ADCCONTROL1, writes DACCONTROL3) — we use direct I2C for DACCONTROL3.
     ESP_LOGI("main", "Initializing ES8388 codec...");
     if (!es8388.init()) {
         ESP_LOGE("main", "Failed to initialize ES8388!");
@@ -501,50 +517,59 @@ void setup() {
         M5.Display.setTextColor(GREEN);
         M5.Display.println("ES8388: OK");
     }
+    startup_step("S05", "ES8388_init");
 
-    // Configure ES8388 for DAC output
+    // Library bug: Module-Audio setDACmute() reads ES8388_ADCCONTROL1 (0x09) but writes
+    // ES8388_DACCONTROL3 (0x19), corrupting DACCONTROL3. Do not use setDACmute(); use direct I2C on DACCONTROL3.
+
+    // Temporary test: soft ramp on, mute off (unmute), volume 0. No mute toggle — set volume 0 and
+    // enable SoftRamp, then write DACCONTROL3 with SoftRamp set and Mute bit clear.
     es8388.setDACOutput(DAC_OUTPUT_OUT1);
-    es8388.setDACVolume(100);
+    es8388.setDACVolume(0);
     es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
     es8388.setSampleRate(SAMPLE_RATE_44K);
+    startup_step("S06", "DAC_config_volume0");
 
-    // ES8388 DAC Soft Ramp: datasheet Reg.25 (DAC Control 3, addr 0x19) = DACRampRate, DACSoftRamp, DACLeR, DACMute.
-    // Enable DACSoftRamp (bit 5) so DAC output ramps on volume/envelope changes; leave other bits (mute, etc.) unchanged.
-    // Module-Audio init() writes DACCONTROL3=0x00; setDACmute() uses this register for mute. We only set SoftRamp here.
+    // DACCONTROL3 (0x19): bit5 = DACSoftRamp, bit1 = DACMute. Set SoftRamp, clear Mute (unmute).
     {
-        uint8_t reg25 = 0x00;  // fallback if I2C read fails
+        uint8_t reg25 = 0x00;
         Wire.beginTransmission(ES8388_ADDR);
         Wire.write(ES8388_DACCONTROL3);
         Wire.endTransmission(false);
         if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
             reg25 = Wire.read();
         }
-        reg25 |= 0x20;  // DACSoftRamp (bit 5) per datasheet Reg.25
+        reg25 = (reg25 & ~0x02u) | 0x20u;  // clear Mute (bit1), set SoftRamp (bit5)
         Wire.beginTransmission(ES8388_ADDR);
         Wire.write(ES8388_DACCONTROL3);
         Wire.write(reg25);
         if (Wire.endTransmission() == 0) {
-            ESP_LOGI("main", "ES8388 DACSoftRamp enabled (DACCONTROL3=0x%02X)", reg25);
+            ESP_LOGI("main", "ES8388 DACCONTROL3=0x%02X (SoftRamp on, unmute, vol0)", reg25);
         }
     }
+    startup_step("S07", "DAC_SoftRamp");
 
     // Configure MCLK output on GPIO0 (required for ES8388)
     ESP_LOGI("main", "Configuring MCLK output on GPIO0...");
     PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
     WRITE_PERI_REG(PIN_CTRL, 0xFFF0);
+    startup_step("S08", "MCLK_GPIO0");
 
     // Initialize ring buffer for delay effect
     ESP_LOGI("main", "Initializing ring buffer...");
     g_ring = new RingBufferInterleaved();
     ESP_LOGI("main", "Ring buffer OK");
+    startup_step("S09", "ring_buffer");
 
     // Disable internal speaker (use Module Audio instead)
     M5.Speaker.end();
+    startup_step("S10", "M5.Speaker.end");
 
     // Configure I2SStream for Module Audio
     // Must call end() first to clear default config, then reconfigure
     ESP_LOGI("main", "Configuring I2SStream for Module Audio...");
     i2s.end(); // Clear any default config
+    startup_step("S11", "i2s.end");
     auto i2s_cfg = i2s.defaultConfig();
     i2s_cfg.pin_bck = SYS_I2S_SCLK_PIN;  // GPIO 19
     i2s_cfg.pin_ws = SYS_I2S_LRCK_PIN;   // GPIO 27
@@ -552,6 +577,7 @@ void setup() {
     i2s.begin(i2s_cfg);
     ESP_LOGI("main", "I2SStream configured: BCK=%d, WS=%d, DATA=%d",
              SYS_I2S_SCLK_PIN, SYS_I2S_LRCK_PIN, SYS_I2S_DOUT_PIN);
+    startup_step("S12", "i2s.begin");
 
     // I2S feed: we own the only path to I2S; library must not write
     a2dp_sink.set_stream_reader(nullptr, false);
@@ -569,6 +595,7 @@ void setup() {
             ESP_LOGI("main", "I2S feed task started (silence on underrun)");
         }
     }
+    startup_step("S13", "feed_ring_and_task");
 
     // Pre-BT test: sine -> silence cycles to locate hiss (same I2S path as A2DP)
     if (kPreBTTestCycles > 0 && g_feed_ring != nullptr) {
@@ -706,7 +733,9 @@ void setup() {
     ESP_LOGI("main", "Starting Bluetooth A2DP Sink...");
     M5.Display.setTextColor(CYAN);
     M5.Display.println("\nStarting BT...");
+    startup_step("S14", "before_a2dp.start");
     a2dp_sink.start("M5Blue");
+    startup_step("S15", "after_a2dp.start");
 
     ESP_LOGI("main", "Setup complete. Waiting for Bluetooth connection...");
     M5.Display.setTextColor(WHITE);
