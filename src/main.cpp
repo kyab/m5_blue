@@ -36,6 +36,76 @@ AudioI2c device;
 // ES8388 codec
 ES8388 es8388(&Wire, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN);
 
+namespace {
+constexpr uint8_t kDacMuteBit = 0x04;               // DACCONTROL3 bit2
+constexpr uint8_t kDacSoftRampBit = 0x20;           // DACCONTROL3 bit5
+constexpr uint8_t kDacRampRateMask = 0xC0;          // DACCONTROL3 bits7:6
+constexpr uint8_t kDacRampRateSlowest = 0xC0;       // 0.5dB / 128 LRCK
+constexpr uint8_t kDacClickFreeBit = 0x08;          // DACCONTROL6 bit3
+constexpr uint8_t kDacPowerAllOff = 0xC0;           // DACPOWER: both DACs off, outputs disabled
+constexpr uint8_t kDacDigitalMute = 0xC0;           // DACCONTROL4/5: -96dB
+constexpr uint32_t kCodecClampDelayMs = 2;
+
+bool es8388_write_reg(uint8_t reg, uint8_t value) {
+    Wire.beginTransmission(ES8388_ADDR);
+    Wire.write(reg);
+    Wire.write(value);
+    return Wire.endTransmission() == 0;
+}
+
+bool es8388_read_reg(uint8_t reg, uint8_t* value) {
+    Wire.beginTransmission(ES8388_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) != 1) return false;
+    *value = Wire.read();
+    return true;
+}
+
+// Force a known-safe DAC state immediately after reset:
+// mute on, soft-ramp slowest, minimum output gain, and DAC outputs disabled.
+bool es8388_apply_reset_safety_clamp() {
+    bool ok = true;
+    uint8_t reg = 0;
+    if (es8388_read_reg(ES8388_DACCONTROL3, &reg)) {
+        reg = static_cast<uint8_t>((reg & ~(kDacRampRateMask | kDacSoftRampBit | kDacMuteBit))
+              | kDacRampRateSlowest | kDacSoftRampBit | kDacMuteBit);
+        ok &= es8388_write_reg(ES8388_DACCONTROL3, reg);
+    } else {
+        ok &= es8388_write_reg(ES8388_DACCONTROL3, static_cast<uint8_t>(kDacRampRateSlowest | kDacSoftRampBit | kDacMuteBit));
+    }
+
+    if (es8388_read_reg(ES8388_DACCONTROL6, &reg)) {
+        reg |= kDacClickFreeBit;
+        ok &= es8388_write_reg(ES8388_DACCONTROL6, reg);
+    } else {
+        ok &= es8388_write_reg(ES8388_DACCONTROL6, kDacClickFreeBit);
+    }
+
+    ok &= es8388_write_reg(ES8388_DACCONTROL24, 0x00);
+    ok &= es8388_write_reg(ES8388_DACCONTROL25, 0x00);
+    ok &= es8388_write_reg(ES8388_DACCONTROL26, 0x00);
+    ok &= es8388_write_reg(ES8388_DACCONTROL27, 0x00);
+    ok &= es8388_write_reg(ES8388_DACCONTROL4, kDacDigitalMute);
+    ok &= es8388_write_reg(ES8388_DACCONTROL5, kDacDigitalMute);
+    ok &= es8388_write_reg(ES8388_DACPOWER, kDacPowerAllOff);
+    delay(kCodecClampDelayMs);
+    return ok;
+}
+
+bool es8388_set_dac_mute_direct(bool mute) {
+    uint8_t reg = 0;
+    if (!es8388_read_reg(ES8388_DACCONTROL3, &reg)) return false;
+    reg = static_cast<uint8_t>((reg & ~kDacRampRateMask) | kDacRampRateSlowest | kDacSoftRampBit);
+    if (mute) {
+        reg |= kDacMuteBit;
+    } else {
+        reg = static_cast<uint8_t>(reg & ~kDacMuteBit);
+    }
+    return es8388_write_reg(ES8388_DACCONTROL3, reg);
+}
+}  // namespace
+
 // I2SStream for audio output (managed by A2DP library)
 I2SStream i2s;
 
@@ -108,8 +178,7 @@ static inline int16_t dither_lsb() {
 // When running this test, DAC ramp is skipped (service_dac_volume_ramp + feed target=0) so we observe raw hardware.
 //
 // ES8388 soft mute is DACCONTROL3 (Reg.25) bit2 (DACMute).
-// DAC soft ramp is DACCONTROL3 bit5 and DACRampRate bits7:6.
-// Keep SoftRamp enabled and only toggle DACMute when muting/unmuting.
+// We use direct I2C RMW here so mute handling is independent from library implementation details.
 //
 // kPreBTTestUseGainRamp: 0 = switch sine/silence buffers (old). 1 = same sine, 2s gain 1->0->0->1 (no buffer switch).
 // When 1, i2s_feed_task logs immediately if ring buffer underrun (feed task starved).
@@ -452,11 +521,12 @@ void setup() {
     auto cfg = M5.config();
     M5.begin(cfg);
 
-    // Run reset-recovery clamp as early as possible:
-    // if ESP32 reset while codec stayed powered (DAC on, volume high, unmuted),
-    // force mute + minimum gain + DAC output off immediately.
+    // Run reset-recovery clamp as early as possible.
+    // This handles the worst case where reset button is pressed while DAC is loud and unmuted.
     Wire.begin(SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN, 400000L);
-    es8388.applyResetSafeDacState();
+    if (!es8388_apply_reset_safety_clamp()) {
+        ESP_LOGW("main", "Early ES8388 safety clamp failed");
+    }
 
     startup_step("S01", "M5.begin");
 
@@ -510,9 +580,7 @@ void setup() {
     }
     startup_step("S04", "AudioI2c");
 
-    // ES8388 init in local Module-Audio starts from reset-safe state:
-    // mute on + SoftRamp slowest + output gain minimum + DACPOWER off, then normal init.
-    // DAC is intentionally left muted after init; we unmute after audio format/volume setup.
+    // Initialize codec after early clamp. Keep volume at minimum until all stream settings are stable.
     ESP_LOGI("main", "Initializing ES8388 codec...");
     if (!es8388.init()) {
         ESP_LOGE("main", "Failed to initialize ES8388!");
@@ -532,9 +600,9 @@ void setup() {
     es8388.setSampleRate(SAMPLE_RATE_44K);
     startup_step("S06", "DAC_config_volume0");
 
-    // Reg.25 bit2 controls DAC mute; clear only this bit and keep SoftRamp/ramp-rate unchanged.
-    if (!es8388.setDACmute(false)) {
-        ESP_LOGW("main", "Failed to unmute ES8388 DAC");
+    // Clear DAC mute via direct RMW on Reg.25 bit2, preserving SoftRamp + slow ramp-rate.
+    if (!es8388_set_dac_mute_direct(false)) {
+        ESP_LOGW("main", "Failed to unmute ES8388 DAC (direct)");
     }
     startup_step("S07", "DAC_unmute");
 

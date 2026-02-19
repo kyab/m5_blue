@@ -98,16 +98,13 @@ Execute as early as possible on boot:
 
 ## Implemented changes in this repository
 
-- Added `ES8388::applyResetSafeDacState()`:
-  - sets reset-recovery safe DAC state as described above.
-- `ES8388::init()` now calls `applyResetSafeDacState()` first.
-- Fixed `ES8388::setDACmute(bool)`:
-  - now reads `DACCONTROL3` (not `ADCCONTROL1`),
-  - now toggles mute at **bit2** (`0x04`), preserving other bits.
-- `main.cpp`:
-  - applies startup clamp early in `setup()`,
-  - removes direct raw I2C writes to `DACCONTROL3`,
-  - uses `setDACmute(false)` for controlled unmute after DAC format/volume setup.
+- Reworked implementation to avoid fragile merge/conflict dependency on local codec library forks.
+- `platformio.ini` uses the project submodule layout (`Module-Audio` + `ESP32-A2DP`) like `main` branch.
+- `main.cpp` now owns the reset-safety sequence with direct I2C register operations:
+  - early boot clamp (`DACMute=1`, `SoftRamp=1`, slowest ramp, minimum gains, `DACPOWER=0xC0`),
+  - direct mute/unmute by RMW on `DACCONTROL3` bit2,
+  - controlled unmute only after DAC format/sample-rate/volume setup.
+- The approach keeps ES8388 safety logic explicit and local to app startup code, reducing future rebase conflicts.
 
 ## Why this is safer for reset-button development loops
 
