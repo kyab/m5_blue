@@ -7,6 +7,7 @@
 #include "AudioTools.h"
 #include "BluetoothA2DPSink.h"
 #include "RingBuffer.hpp"
+#include "DJFilter.hpp"
 #include "freertos/ringbuf.h"
 #include "freertos/task.h"
 #include <cmath>
@@ -60,6 +61,13 @@ RingBufferInterleaved* g_ring = nullptr;
 // Effect flags
 bool g_effect_blue = false; // Volume reduction
 bool g_effect_red = false;  // Delay effect
+
+// DJ Filter (Going-Zero port): knob-driven LPF/HPF crossover
+static DJFilter g_dj_filter;
+// Scratch buffers for int16<->float deinterleave in audio_callback (non-reentrant: BT callback is single-threaded)
+static const uint32_t kMaxCallbackSamples = 1024;
+static float s_dj_left[kMaxCallbackSamples];
+static float s_dj_right[kMaxCallbackSamples];
 
 // I2S feed: app-owned ring buffer so we can output silence when callback doesn't run.
 //
@@ -246,6 +254,27 @@ void audio_callback(int16_t* data, uint32_t sample_num) {
             g_ring->readSamplesTo(data, sample_num);
         } else {
             g_ring->storeSamples(data, sample_num);
+        }
+    }
+
+    // DJ Filter (Going-Zero): deinterleave int16 -> float, process, reinterleave back with clamp.
+    // Cap at kMaxCallbackSamples; leftover tail (if any) bypasses DJ filter but still goes to I2S feed ring.
+    {
+        uint32_t n = (sample_num > kMaxCallbackSamples) ? kMaxCallbackSamples : sample_num;
+        for (uint32_t i = 0; i < n; i++) {
+            s_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
+            s_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
+        }
+        g_dj_filter.process(s_dj_left, s_dj_right, n);
+        for (uint32_t i = 0; i < n; i++) {
+            float l = s_dj_left[i] * 32768.0f;
+            float r = s_dj_right[i] * 32768.0f;
+            if (l > 32767.0f) l = 32767.0f;
+            else if (l < -32768.0f) l = -32768.0f;
+            if (r > 32767.0f) r = 32767.0f;
+            else if (r < -32768.0f) r = -32768.0f;
+            data[i * 2] = static_cast<int16_t>(l);
+            data[i * 2 + 1] = static_cast<int16_t>(r);
         }
     }
 
@@ -806,21 +835,36 @@ void loop() {
         device.setRGBLED(2, 0x00FF00); // Green LED
     }
 
-    // Rotation angle unit (Grove B): read and dump at 5 Hz to avoid log flood
+    // Rotation angle unit (Grove B): drive DJ filter every loop (~100 Hz), log/display at 5 Hz.
+    // Knob mapping matches Going-Zero GUI horizontal slider (minValue=-1, maxValue=+1):
+    //   angle=360 (knob full left)  -> v=-1 (LPF heavy)
+    //   angle=180 (center)          -> v= 0 (bypass)
+    //   angle=0   (knob full right) -> v=+1 (HPF heavy)
     {
+        int mV = analogReadMilliVolts(ROTATION_ANGLE_GPIO);
+        float angle = (float)mV * 360.0f / 2500.0f;
+        if (angle > 360.0f) angle = 360.0f;
+        if (angle < 0.0f) angle = 0.0f;
+        float v = (180.0f - angle) / 180.0f;
+        if (v > 1.0f) v = 1.0f;
+        if (v < -1.0f) v = -1.0f;
+        // Small deadzone so a physical knob near the center reliably hits exact bypass (reset+fade-in path)
+        if (fabsf(v) < 0.03f) v = 0.0f;
+        g_dj_filter.setFilterValue(v);
+
         static uint32_t last_rotation_dump_ms = 0;
         uint32_t now_ms = (uint32_t)millis();
         if (now_ms - last_rotation_dump_ms >= 200) {
             last_rotation_dump_ms = now_ms;
             int raw = analogRead(ROTATION_ANGLE_GPIO);
-            int mV = analogReadMilliVolts(ROTATION_ANGLE_GPIO);
-            uint32_t angle = (uint32_t)mV * 360u / 2500u;
-            if (angle > 360u) angle = 360u;
-            ESP_LOGI("main", "Rotation raw=%d mV=%d angle=%lu", raw, mV, (unsigned long)angle);
+            uint32_t angle_disp = (uint32_t)angle;
+            const char* mode = (v == 0.0f) ? "BYPASS" : (v < 0.0f ? "LPF" : "HPF");
+            ESP_LOGI("main", "Rotation raw=%d mV=%d angle=%lu v=%.3f mode=%s",
+                     raw, mV, (unsigned long)angle_disp, (double)v, mode);
             M5.Display.fillRect(0, 220, 320, 20, BLACK);
             M5.Display.setCursor(0, 220);
             M5.Display.setTextColor(WHITE);
-            M5.Display.printf("Rotation: raw=%d mV=%d deg=%lu   ", raw, mV, (unsigned long)angle);
+            M5.Display.printf("Rot deg=%lu v=%+.2f %s   ", (unsigned long)angle_disp, (double)v, mode);
         }
     }
 
