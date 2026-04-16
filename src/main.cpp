@@ -97,6 +97,8 @@ static TaskHandle_t g_i2s_feed_task_handle = nullptr;
 static const uint32_t kRampUpSamples = (kSampleRate * 100) / 1000;         // 100 ms fade-in
 static const uint32_t kTrackChangeMuteSamples = (kSampleRate * 35) / 1000; // 35 ms mute
 volatile bool g_bt_connected = false;
+volatile esp_a2d_connection_state_t g_bt_connection_state = ESP_A2D_CONNECTION_STATE_DISCONNECTED;
+volatile bool g_bt_state_display_dirty = true;
 volatile uint32_t g_ramp_up_samples_left = 0;
 volatile uint32_t g_track_change_mute_left = 0;
 
@@ -133,6 +135,17 @@ static const int kPreBTTestUseGainRamp = 1;  // 1 = gain-ramp test (2s full, 2s 
 
 // Forward declarations
 void i2s_feed_task(void* arg);
+
+static void update_bt_status_display() {
+    if (!g_bt_state_display_dirty) return;
+    g_bt_state_display_dirty = false;
+    const char* state_str[] = {"Disconnected", "Connecting", "Connected", "Disconnecting"};
+    esp_a2d_connection_state_t state = g_bt_connection_state;
+    M5.Display.fillRect(0, 180, 320, 20, BLACK);
+    M5.Display.setCursor(0, 180);
+    M5.Display.setTextColor(state == ESP_A2D_CONNECTION_STATE_CONNECTED ? GREEN : YELLOW);
+    M5.Display.printf("BT: %s", state_str[state]);
+}
 
 // Ramps g_dac_volume_current toward g_dac_volume_target; call from loop(). Skipped when kPreBTTestCycles > 0.
 static const int kDacVolumeRampStep = 20;
@@ -261,6 +274,8 @@ void audio_callback(int16_t* data, uint32_t sample_num) {
 void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
     const char* state_str[] = {"Disconnected", "Connecting", "Connected", "Disconnecting"};
     ESP_LOGI("a2dp", "Connection state: %s", state_str[state]);
+    g_bt_connection_state = state;
+    g_bt_state_display_dirty = true;
 
     if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
         g_bt_connected = true;
@@ -269,11 +284,6 @@ void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
         g_bt_connected = false;
     }
 
-    // Update display
-    M5.Display.fillRect(0, 180, 320, 60, BLACK);
-    M5.Display.setCursor(0, 180);
-    M5.Display.setTextColor(state == ESP_A2D_CONNECTION_STATE_CONNECTED ? GREEN : YELLOW);
-    M5.Display.printf("BT: %s", state_str[state]);
 }
 
 // AVRCP track change: brief mute to avoid click between tracks
@@ -761,6 +771,7 @@ void setup() {
 
 void loop() {
     M5.update();
+    update_bt_status_display();
 
     // DAC volume target is set by i2s_feed_task (0 or 100); ramp is applied here
     service_dac_volume_ramp();
@@ -806,6 +817,7 @@ void loop() {
             uint32_t angle = (uint32_t)mV * 360u / 2500u;
             if (angle > 360u) angle = 360u;
             ESP_LOGI("main", "Rotation raw=%d mV=%d angle=%lu", raw, mV, (unsigned long)angle);
+            M5.Display.fillRect(0, 220, 320, 20, BLACK);
             M5.Display.setCursor(0, 220);
             M5.Display.setTextColor(WHITE);
             M5.Display.printf("Rotation: raw=%d mV=%d deg=%lu   ", raw, mV, (unsigned long)angle);
