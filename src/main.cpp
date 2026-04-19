@@ -836,16 +836,35 @@ void loop() {
     }
 
     // Rotation angle unit (Grove B): drive DJ filter every loop (~100 Hz), log/display at 5 Hz.
-    // Knob mapping matches Going-Zero GUI horizontal slider (minValue=-1, maxValue=+1):
-    //   angle=360 (knob full left)  -> v=-1 (LPF heavy)
-    //   angle=180 (center)          -> v= 0 (bypass)
-    //   angle=0   (knob full right) -> v=+1 (HPF heavy)
+    // Knob is asymmetric (center mV is NOT the midpoint of min/max); use piecewise linear mapping
+    // calibrated from measured values. Going-Zero GUI horizontal slider equivalence:
+    //   knob full left  (mV=ROT_MV_LEFT  =3145) -> v=-1 (LPF heavy)
+    //   knob center     (mV=ROT_MV_CENTER=2100) -> v= 0 (bypass)
+    //   knob full right (mV=ROT_MV_RIGHT = 142) -> v=+1 (HPF heavy)
     {
+        const int ROT_MV_LEFT = 3145;
+        const int ROT_MV_CENTER = 2100;
+        const int ROT_MV_RIGHT = 142;
+
         int mV = analogReadMilliVolts(ROTATION_ANGLE_GPIO);
-        float angle = (float)mV * 360.0f / 2500.0f;
-        if (angle > 360.0f) angle = 360.0f;
-        if (angle < 0.0f) angle = 0.0f;
-        float v = (180.0f - angle) / 180.0f;
+        int raw = analogRead(ROTATION_ANGLE_GPIO);
+        // Track observed min/max for both readings since boot (calibration aid)
+        static int s_mV_min = 99999;
+        static int s_mV_max = -1;
+        static int s_raw_min = 99999;
+        static int s_raw_max = -1;
+        if (mV < s_mV_min) s_mV_min = mV;
+        if (mV > s_mV_max) s_mV_max = mV;
+        if (raw < s_raw_min) s_raw_min = raw;
+        if (raw > s_raw_max) s_raw_max = raw;
+
+        // Piecewise linear: separate slopes for the LPF (mV >= center) and HPF (mV < center) halves.
+        float v;
+        if (mV >= ROT_MV_CENTER) {
+            v = -(float)(mV - ROT_MV_CENTER) / (float)(ROT_MV_LEFT - ROT_MV_CENTER);
+        } else {
+            v = (float)(ROT_MV_CENTER - mV) / (float)(ROT_MV_CENTER - ROT_MV_RIGHT);
+        }
         if (v > 1.0f) v = 1.0f;
         if (v < -1.0f) v = -1.0f;
         // Small deadzone so a physical knob near the center reliably hits exact bypass (reset+fade-in path)
@@ -856,15 +875,19 @@ void loop() {
         uint32_t now_ms = (uint32_t)millis();
         if (now_ms - last_rotation_dump_ms >= 200) {
             last_rotation_dump_ms = now_ms;
-            int raw = analogRead(ROTATION_ANGLE_GPIO);
-            uint32_t angle_disp = (uint32_t)angle;
             const char* mode = (v == 0.0f) ? "BYPASS" : (v < 0.0f ? "LPF" : "HPF");
-            ESP_LOGI("main", "Rotation raw=%d mV=%d angle=%lu v=%.3f mode=%s",
-                     raw, mV, (unsigned long)angle_disp, (double)v, mode);
+            ESP_LOGI("main", "Rotation mV=%d (min=%d max=%d) raw=%d (min=%d max=%d) v=%.3f mode=%s",
+                     mV, s_mV_min, s_mV_max, raw, s_raw_min, s_raw_max, (double)v, mode);
+            // mV + filter value line (row 200, yellow)
+            M5.Display.fillRect(0, 200, 320, 20, BLACK);
+            M5.Display.setCursor(0, 200);
+            M5.Display.setTextColor(YELLOW);
+            M5.Display.printf("mV=%4d  v=%+.2f", mV, (double)v);
+            // raw line (row 220, cyan)
             M5.Display.fillRect(0, 220, 320, 20, BLACK);
             M5.Display.setCursor(0, 220);
-            M5.Display.setTextColor(WHITE);
-            M5.Display.printf("Rot deg=%lu v=%+.2f %s   ", (unsigned long)angle_disp, (double)v, mode);
+            M5.Display.setTextColor(CYAN);
+            M5.Display.printf("raw=%4d", raw);
         }
     }
 
