@@ -836,8 +836,9 @@ void loop() {
     }
 
     // Rotation angle unit (Grove B): drive DJ filter every loop (~100 Hz), log/display at 5 Hz.
-    // Knob is asymmetric (center mV is NOT the midpoint of min/max); use piecewise linear mapping
-    // calibrated from measured values. Going-Zero GUI horizontal slider equivalence:
+    // ESP32 ADC on GPIO36 is inherently noisy; apply (A) 16x oversampling + (B) EMA low-pass
+    // before mapping to v. Knob asymmetric around center, so use piecewise linear mapping.
+    // Going-Zero GUI horizontal slider equivalence:
     //   knob full left  (mV=ROT_MV_LEFT  =3145) -> v=-1 (LPF heavy)
     //   knob center     (mV=ROT_MV_CENTER=2100) -> v= 0 (bypass)
     //   knob full right (mV=ROT_MV_RIGHT = 142) -> v=+1 (HPF heavy)
@@ -846,9 +847,35 @@ void loop() {
         const int ROT_MV_CENTER = 2100;
         const int ROT_MV_RIGHT = 142;
 
-        int mV = analogReadMilliVolts(ROTATION_ANGLE_GPIO);
-        int raw = analogRead(ROTATION_ANGLE_GPIO);
-        // Track observed min/max for both readings since boot (calibration aid)
+        // (A) Oversampling: read N times in a burst and average (~1ms total on GPIO36)
+        const int kOversampleN = 16;
+        int mV_sum = 0;
+        int raw_sum = 0;
+        for (int i = 0; i < kOversampleN; i++) {
+            mV_sum += analogReadMilliVolts(ROTATION_ANGLE_GPIO);
+            raw_sum += analogRead(ROTATION_ANGLE_GPIO);
+        }
+        int mV_avg = mV_sum / kOversampleN;
+        int raw_avg = raw_sum / kOversampleN;
+
+        // (B) EMA low-pass filter: mV_filt = alpha * mV_avg + (1 - alpha) * mV_filt
+        // alpha=0.2 at ~100Hz loop => time constant ~50ms (enough smoothing, still responsive)
+        static float s_mV_filt = 0.0f;
+        static float s_raw_filt = 0.0f;
+        static bool s_ema_init = false;
+        const float kEmaAlpha = 0.2f;
+        if (!s_ema_init) {
+            s_mV_filt = (float)mV_avg;
+            s_raw_filt = (float)raw_avg;
+            s_ema_init = true;
+        } else {
+            s_mV_filt = kEmaAlpha * (float)mV_avg + (1.0f - kEmaAlpha) * s_mV_filt;
+            s_raw_filt = kEmaAlpha * (float)raw_avg + (1.0f - kEmaAlpha) * s_raw_filt;
+        }
+        int mV = (int)s_mV_filt;
+        int raw = (int)s_raw_filt;
+
+        // Track observed min/max of the smoothed readings (calibration aid, serial log)
         static int s_mV_min = 99999;
         static int s_mV_max = -1;
         static int s_raw_min = 99999;
