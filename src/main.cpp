@@ -7,6 +7,7 @@
 #include "AudioTools.h"
 #include "BluetoothA2DPSink.h"
 #include "RingBuffer.hpp"
+#include "DJFilter.hpp"
 #include "freertos/ringbuf.h"
 #include "freertos/task.h"
 #include <cmath>
@@ -60,6 +61,13 @@ RingBufferInterleaved* g_ring = nullptr;
 // Effect flags
 bool g_effect_blue = false; // Volume reduction
 bool g_effect_red = false;  // Delay effect
+
+// DJ Filter (Going-Zero port): knob-driven LPF/HPF crossover
+static DJFilter g_dj_filter;
+// Scratch buffers for int16<->float deinterleave in audio_callback (non-reentrant: BT callback is single-threaded)
+static const uint32_t kMaxCallbackSamples = 1024;
+static float s_dj_left[kMaxCallbackSamples];
+static float s_dj_right[kMaxCallbackSamples];
 
 // I2S feed: app-owned ring buffer so we can output silence when callback doesn't run.
 //
@@ -246,6 +254,27 @@ void audio_callback(int16_t* data, uint32_t sample_num) {
             g_ring->readSamplesTo(data, sample_num);
         } else {
             g_ring->storeSamples(data, sample_num);
+        }
+    }
+
+    // DJ Filter (Going-Zero): deinterleave int16 -> float, process, reinterleave back with clamp.
+    // Cap at kMaxCallbackSamples; leftover tail (if any) bypasses DJ filter but still goes to I2S feed ring.
+    {
+        uint32_t n = (sample_num > kMaxCallbackSamples) ? kMaxCallbackSamples : sample_num;
+        for (uint32_t i = 0; i < n; i++) {
+            s_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
+            s_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
+        }
+        g_dj_filter.process(s_dj_left, s_dj_right, n);
+        for (uint32_t i = 0; i < n; i++) {
+            float l = s_dj_left[i] * 32768.0f;
+            float r = s_dj_right[i] * 32768.0f;
+            if (l > 32767.0f) l = 32767.0f;
+            else if (l < -32768.0f) l = -32768.0f;
+            if (r > 32767.0f) r = 32767.0f;
+            else if (r < -32768.0f) r = -32768.0f;
+            data[i * 2] = static_cast<int16_t>(l);
+            data[i * 2 + 1] = static_cast<int16_t>(r);
         }
     }
 
@@ -806,21 +835,86 @@ void loop() {
         device.setRGBLED(2, 0x00FF00); // Green LED
     }
 
-    // Rotation angle unit (Grove B): read and dump at 5 Hz to avoid log flood
+    // Rotation angle unit (Grove B): drive DJ filter every loop (~100 Hz), log/display at 5 Hz.
+    // ESP32 ADC on GPIO36 is inherently noisy; apply (A) 16x oversampling + (B) EMA low-pass
+    // before mapping to v. Knob asymmetric around center, so use piecewise linear mapping.
+    // Going-Zero GUI horizontal slider equivalence:
+    //   knob full left  (mV=ROT_MV_LEFT  =3145) -> v=-1 (LPF heavy)
+    //   knob center     (mV=ROT_MV_CENTER=2100) -> v= 0 (bypass)
+    //   knob full right (mV=ROT_MV_RIGHT = 142) -> v=+1 (HPF heavy)
     {
+        const int ROT_MV_LEFT = 3145;
+        const int ROT_MV_CENTER = 2100;
+        const int ROT_MV_RIGHT = 142;
+
+        // (A) Oversampling: read N times in a burst and average (~1ms total on GPIO36)
+        const int kOversampleN = 16;
+        int mV_sum = 0;
+        int raw_sum = 0;
+        for (int i = 0; i < kOversampleN; i++) {
+            mV_sum += analogReadMilliVolts(ROTATION_ANGLE_GPIO);
+            raw_sum += analogRead(ROTATION_ANGLE_GPIO);
+        }
+        int mV_avg = mV_sum / kOversampleN;
+        int raw_avg = raw_sum / kOversampleN;
+
+        // (B) EMA low-pass filter: mV_filt = alpha * mV_avg + (1 - alpha) * mV_filt
+        // alpha=0.2 at ~100Hz loop => time constant ~50ms (enough smoothing, still responsive)
+        static float s_mV_filt = 0.0f;
+        static float s_raw_filt = 0.0f;
+        static bool s_ema_init = false;
+        const float kEmaAlpha = 0.2f;
+        if (!s_ema_init) {
+            s_mV_filt = (float)mV_avg;
+            s_raw_filt = (float)raw_avg;
+            s_ema_init = true;
+        } else {
+            s_mV_filt = kEmaAlpha * (float)mV_avg + (1.0f - kEmaAlpha) * s_mV_filt;
+            s_raw_filt = kEmaAlpha * (float)raw_avg + (1.0f - kEmaAlpha) * s_raw_filt;
+        }
+        int mV = (int)s_mV_filt;
+        int raw = (int)s_raw_filt;
+
+        // Track observed min/max of the smoothed readings (calibration aid, serial log)
+        static int s_mV_min = 99999;
+        static int s_mV_max = -1;
+        static int s_raw_min = 99999;
+        static int s_raw_max = -1;
+        if (mV < s_mV_min) s_mV_min = mV;
+        if (mV > s_mV_max) s_mV_max = mV;
+        if (raw < s_raw_min) s_raw_min = raw;
+        if (raw > s_raw_max) s_raw_max = raw;
+
+        // Piecewise linear: separate slopes for the LPF (mV >= center) and HPF (mV < center) halves.
+        float v;
+        if (mV >= ROT_MV_CENTER) {
+            v = -(float)(mV - ROT_MV_CENTER) / (float)(ROT_MV_LEFT - ROT_MV_CENTER);
+        } else {
+            v = (float)(ROT_MV_CENTER - mV) / (float)(ROT_MV_CENTER - ROT_MV_RIGHT);
+        }
+        if (v > 1.0f) v = 1.0f;
+        if (v < -1.0f) v = -1.0f;
+        // Small deadzone so a physical knob near the center reliably hits exact bypass (reset+fade-in path)
+        if (fabsf(v) < 0.03f) v = 0.0f;
+        g_dj_filter.setFilterValue(v);
+
         static uint32_t last_rotation_dump_ms = 0;
         uint32_t now_ms = (uint32_t)millis();
         if (now_ms - last_rotation_dump_ms >= 200) {
             last_rotation_dump_ms = now_ms;
-            int raw = analogRead(ROTATION_ANGLE_GPIO);
-            int mV = analogReadMilliVolts(ROTATION_ANGLE_GPIO);
-            uint32_t angle = (uint32_t)mV * 360u / 2500u;
-            if (angle > 360u) angle = 360u;
-            ESP_LOGI("main", "Rotation raw=%d mV=%d angle=%lu", raw, mV, (unsigned long)angle);
+            const char* mode = (v == 0.0f) ? "BYPASS" : (v < 0.0f ? "LPF" : "HPF");
+            ESP_LOGI("main", "Rotation mV=%d (min=%d max=%d) raw=%d (min=%d max=%d) v=%.3f mode=%s",
+                     mV, s_mV_min, s_mV_max, raw, s_raw_min, s_raw_max, (double)v, mode);
+            // mV + filter value line (row 200, yellow)
+            M5.Display.fillRect(0, 200, 320, 20, BLACK);
+            M5.Display.setCursor(0, 200);
+            M5.Display.setTextColor(YELLOW);
+            M5.Display.printf("mV=%4d  v=%+.2f", mV, (double)v);
+            // raw line (row 220, cyan)
             M5.Display.fillRect(0, 220, 320, 20, BLACK);
             M5.Display.setCursor(0, 220);
-            M5.Display.setTextColor(WHITE);
-            M5.Display.printf("Rotation: raw=%d mV=%d deg=%lu   ", raw, mV, (unsigned long)angle);
+            M5.Display.setTextColor(CYAN);
+            M5.Display.printf("raw=%4d", raw);
         }
     }
 
