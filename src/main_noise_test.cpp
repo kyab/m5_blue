@@ -2,16 +2,26 @@
 //
 // Purpose:
 //   Compare audible hiss/noise between USB-powered and battery-powered operation
-//   on M5Stack Core2 + Module Audio (ES8388) + M5GO Bottom2.
+//   on M5Stack Core2 + Module Audio (ES8388) + M5GO Bottom2, and locate the
+//   source of the per-channel asymmetry observed in the first round of tests
+//   (hiss appeared only on the left output, and only when PCM was non-zero).
 //
 // Design (per ChatGPT discussion, share/69e63dce-34dc-83ab-bdd7-f8aa55aae4d3):
 //   - Disable BLE/A2DP/Wi-Fi so their RF activity cannot contribute.
 //   - Keep DAC / HP output analog path alive (do NOT use ES8388 DAC mute).
-//   - Drive a pure I2S stream with three alternating segments:
-//       1) 1 kHz sine (reference tone)
-//       2) PCM all zero (observe "DAC alive but zero input" hiss)
-//       3) 1 kHz sine (reference again, for A/B repeat)
-//       4) +-1 LSB dither (avoid any possible zero-detect auto-mute; per ChatGPT)
+//   - Drive a pure I2S stream with five alternating segments (2 s each):
+//       1) SINE_LR  : 1 kHz sine on both L and R
+//       2) ZERO     : PCM all zero on both channels
+//       3) L_ONLY   : 1 kHz sine on L only, R = 0
+//       4) R_ONLY   : 1 kHz sine on R only, L = 0
+//       5) DITHER_LR: +-1 LSB dither on both channels
+//     L_ONLY / R_ONLY pinpoint whether the hiss follows the driven channel
+//     (indicating a per-channel analog output-stage issue) or appears on a
+//     fixed side regardless of which channel is driven (indicating crosstalk
+//     / a single noisy output stage enabled by zero-detect release).
+//   - At each segment edge (plus mid-ZERO) the focused set of ES8388 control
+//     registers is read back and logged so any auto-mute / zero-detect /
+//     mixer changes become visible.
 //   - Repeat forever so the user can flip between USB and battery in situ.
 //
 // Build: enable via the dedicated PlatformIO env `m5stack-core2-noise-test`.
@@ -61,22 +71,26 @@ static inline int16_t dither_lsb() {
     return (g_lfsr & 1u) ? (int16_t)1 : (int16_t)-1;
 }
 
-// Segment kinds
+// Segment kinds. Order is significant: SINE_LR then ZERO give a direct A/B
+// compare, then L_ONLY / R_ONLY isolate per-channel behaviour, DITHER_LR at
+// the end stresses the "non-zero but sub-audible" path.
 enum Segment {
-    SEG_SINE_A = 0,
-    SEG_ZERO   = 1,
-    SEG_SINE_B = 2,
-    SEG_DITHER = 3,
-    SEG_COUNT  = 4,
+    SEG_SINE_LR   = 0,
+    SEG_ZERO      = 1,
+    SEG_L_ONLY    = 2,
+    SEG_R_ONLY    = 3,
+    SEG_DITHER_LR = 4,
+    SEG_COUNT     = 5,
 };
 
 static const char* segment_name(Segment s) {
     switch (s) {
-    case SEG_SINE_A: return "SINE_A";
-    case SEG_ZERO:   return "ZERO  ";
-    case SEG_SINE_B: return "SINE_B";
-    case SEG_DITHER: return "DITHER";
-    case SEG_COUNT:  break;
+    case SEG_SINE_LR:   return "SINE_LR  ";
+    case SEG_ZERO:      return "ZERO     ";
+    case SEG_L_ONLY:    return "L_ONLY   ";
+    case SEG_R_ONLY:    return "R_ONLY   ";
+    case SEG_DITHER_LR: return "DITHER_LR";
+    case SEG_COUNT:     break;
     }
     return "?";
 }
@@ -89,7 +103,10 @@ I2SStream g_i2s;
 static int16_t g_block[kBlockSamples * 2];  // stereo
 static double g_phase = 0.0;                // carry sine phase across blocks to avoid clicks
 
-static void fill_sine_block() {
+// Fill with sine, selectable per-channel. left_on / right_on control whether
+// each channel receives the tone or digital zero; phase is always advanced
+// (so the tone is continuous across L_ONLY / R_ONLY transitions).
+static void fill_sine_block(bool left_on, bool right_on) {
     const double inc = 2.0 * M_PI * (double)kToneFreqHz / (double)kSampleRate;
     const float amp = kToneAmplitude * 32767.0f;
     for (uint32_t i = 0; i < kBlockSamples; i++) {
@@ -97,8 +114,8 @@ static void fill_sine_block() {
         g_phase += inc;
         if (g_phase >= 2.0 * M_PI) g_phase -= 2.0 * M_PI;
         int16_t s = (int16_t)v;
-        g_block[i * 2 + 0] = s;
-        g_block[i * 2 + 1] = s;
+        g_block[i * 2 + 0] = left_on ? s : (int16_t)0;
+        g_block[i * 2 + 1] = right_on ? s : (int16_t)0;
     }
 }
 
@@ -108,9 +125,59 @@ static void fill_zero_block() {
 
 static void fill_dither_block() {
     for (uint32_t i = 0; i < kBlockSamples; i++) {
-        int16_t d = dither_lsb();
-        g_block[i * 2 + 0] = d;
-        g_block[i * 2 + 1] = d;
+        int16_t d1 = dither_lsb();
+        int16_t d2 = dither_lsb();
+        g_block[i * 2 + 0] = d1;
+        g_block[i * 2 + 1] = d2;
+    }
+}
+
+// Read one ES8388 register over I2C. Returns 0xFF if the I2C transaction fails.
+static uint8_t es8388_read_reg(uint8_t reg) {
+    Wire.beginTransmission(ES8388_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return 0xFF;
+    if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) != 1) return 0xFF;
+    return Wire.read();
+}
+
+// Dump the registers that matter for "hiss / zero-detect / per-channel mute"
+// analysis. We avoid dumping all 0x00-0x34 to keep serial output readable;
+// the selected set covers power gates, mute, soft-ramp, digital volumes,
+// mixers, and headphone output volumes on both L and R.
+static void dump_es8388_regs(const char* tag) {
+    struct RegDesc {
+        uint8_t addr;
+        const char* name;
+    };
+    static const RegDesc regs[] = {
+        {0x00, "CONTROL1     "},
+        {0x01, "CONTROL2     "},
+        {0x02, "CHIPPOWER    "},
+        {0x03, "ADCPOWER     "},
+        {0x04, "DACPOWER     "},
+        {0x07, "ANAVOLMANAG  "},
+        {0x19, "DACCTRL3(mut)"},  // bit1 DACMute, bit5 DACSoftRamp, bit4 DACLeR
+        {0x1A, "DACCTRL4(Lvl)"},  // DAC left digital volume
+        {0x1B, "DACCTRL5(Rvl)"},  // DAC right digital volume
+        {0x1D, "DACCTRL7     "},
+        {0x1E, "DACCTRL8     "},
+        {0x1F, "DACCTRL9(swp)"},  // channel swap
+        {0x20, "DACCTRL10(Zx)"},  // Zero cross detect / fade
+        {0x23, "DACCTRL13    "},
+        {0x26, "DACCTRL16(mx)"},  // Left mixer volume
+        {0x27, "DACCTRL17(mx)"},  // Right mixer volume
+        {0x2E, "LOUT1 vol    "},  // DACCONTROL24
+        {0x2F, "ROUT1 vol    "},  // DACCONTROL25
+        {0x30, "LOUT2 vol    "},  // DACCONTROL26
+        {0x31, "ROUT2 vol    "},  // DACCONTROL27
+    };
+    Serial.printf("[reg-dump tag=%s]\n", tag);
+    for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+        uint8_t v = es8388_read_reg(regs[i].addr);
+        Serial.printf("  0x%02X %s = 0x%02X  (0b", regs[i].addr, regs[i].name, v);
+        for (int bit = 7; bit >= 0; bit--) Serial.print(((v >> bit) & 1) ? '1' : '0');
+        Serial.println(")");
     }
 }
 
@@ -145,7 +212,7 @@ static void draw_header() {
     M5.Display.println("I2S Noise Test");
     M5.Display.setTextColor(CYAN);
     M5.Display.printf("fs=%u  tone=%.0fHz\n", (unsigned)kSampleRate, (double)kToneFreqHz);
-    M5.Display.printf("amp=%.2f (sine/0/sine/dither)\n", (double)kToneAmplitude);
+    M5.Display.printf("amp=%.2f  5-seg L/R probe\n", (double)kToneAmplitude);
     M5.Display.setTextColor(YELLOW);
     M5.Display.println("BT: OFF  WiFi: OFF");
 }
@@ -156,11 +223,12 @@ static void draw_segment(Segment seg, uint32_t cycle) {
     M5.Display.setTextSize(3);
     uint16_t color = WHITE;
     switch (seg) {
-    case SEG_SINE_A: color = GREEN;  break;
-    case SEG_ZERO:   color = RED;    break;
-    case SEG_SINE_B: color = GREEN;  break;
-    case SEG_DITHER: color = MAGENTA;break;
-    case SEG_COUNT:  break;
+    case SEG_SINE_LR:   color = GREEN;   break;
+    case SEG_ZERO:      color = RED;     break;
+    case SEG_L_ONLY:    color = YELLOW;  break;
+    case SEG_R_ONLY:    color = CYAN;    break;
+    case SEG_DITHER_LR: color = MAGENTA; break;
+    case SEG_COUNT:     break;
     }
     M5.Display.setTextColor(color);
     M5.Display.printf("%s\n", segment_name(seg));
@@ -253,7 +321,10 @@ void setup() {
     Serial.printf("[i2s] started: fs=%u BCK=%d WS=%d DATA=%d\n",
                   (unsigned)kSampleRate, SYS_I2S_SCLK_PIN, SYS_I2S_LRCK_PIN, SYS_I2S_DOUT_PIN);
 
-    Serial.println("[test] looping: SINE_A / ZERO / SINE_B / DITHER  (2s each)");
+    Serial.println("[test] looping: SINE_LR / ZERO / L_ONLY / R_ONLY / DITHER_LR (2s each)");
+
+    // One-off post-init dump so we know the quiescent state of the codec.
+    dump_es8388_regs("post-init");
 }
 
 void loop() {
@@ -264,24 +335,38 @@ void loop() {
         draw_segment(seg, cycle);
         Serial.printf("[seg] cycle=%u seg=%s\n", (unsigned)cycle, segment_name(seg));
         log_power_state();
+        // Dump registers at the start of every segment so we can correlate
+        // register changes (if any) with audible hiss/silence transitions.
+        dump_es8388_regs(segment_name(seg));
 
         const uint32_t total_blocks = (kSampleRate * kSegmentSec) / kBlockSamples;
+        // For ZERO we want a second dump ~halfway through, to catch any
+        // zero-detect / auto-mute that only engages after a settling period.
+        const uint32_t mid_block = total_blocks / 2;
         for (uint32_t b = 0; b < total_blocks; b++) {
             switch (seg) {
-            case SEG_SINE_A:
-            case SEG_SINE_B:
-                fill_sine_block();
+            case SEG_SINE_LR:
+                fill_sine_block(true, true);
                 break;
             case SEG_ZERO:
                 fill_zero_block();
                 break;
-            case SEG_DITHER:
+            case SEG_L_ONLY:
+                fill_sine_block(true, false);
+                break;
+            case SEG_R_ONLY:
+                fill_sine_block(false, true);
+                break;
+            case SEG_DITHER_LR:
                 fill_dither_block();
                 break;
             case SEG_COUNT:
                 break;
             }
             g_i2s.write(reinterpret_cast<const uint8_t*>(g_block), sizeof(g_block));
+            if (seg == SEG_ZERO && b == mid_block) {
+                dump_es8388_regs("ZERO-mid");
+            }
         }
 
         // Let M5Unified service buttons/display during long-running writes.
