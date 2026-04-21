@@ -9,16 +9,20 @@
 // Design (per ChatGPT discussion, share/69e63dce-34dc-83ab-bdd7-f8aa55aae4d3):
 //   - Disable BLE/A2DP/Wi-Fi so their RF activity cannot contribute.
 //   - Keep DAC / HP output analog path alive (do NOT use ES8388 DAC mute).
-//   - Drive a pure I2S stream with five alternating segments (2 s each):
-//       1) SINE_LR  : 1 kHz sine on both L and R
-//       2) ZERO     : PCM all zero on both channels
-//       3) L_ONLY   : 1 kHz sine on L only, R = 0
-//       4) R_ONLY   : 1 kHz sine on R only, L = 0
-//       5) DITHER_LR: +-1 LSB dither on both channels
-//     L_ONLY / R_ONLY pinpoint whether the hiss follows the driven channel
-//     (indicating a per-channel analog output-stage issue) or appears on a
-//     fixed side regardless of which channel is driven (indicating crosstalk
-//     / a single noisy output stage enabled by zero-detect release).
+//   - Drive a pure I2S stream with seven alternating segments (2 s each):
+//       1) SINE_LR   : 1 kHz sine on both L and R (DACPOWER=0x30)
+//       2) ZERO      : PCM all zero on both channels
+//       3) L_ONLY    : 1 kHz sine on L only, R = 0
+//       4) R_ONLY    : 1 kHz sine on R only, L = 0
+//       5) DITHER_LR : +-1 LSB dither on both channels
+//       6) PWR_0x20  : 1 kHz sine L+R, DACPOWER=0x20 (one HP output disabled)
+//       7) PWR_0x10  : 1 kHz sine L+R, DACPOWER=0x10 (the other HP disabled)
+//     L_ONLY / R_ONLY pinpoint whether the hiss follows the driven digital
+//     channel. PWR_0x20 / PWR_0x10 physically disable one HP output pin at a
+//     time (ES8388 DACPOWER bits 5 and 4 are the per-side HP enables; the
+//     L/R mapping varies between datasheet revisions, so we try both) to
+//     determine whether the hiss originates at the LOUT1/ROUT1 pin itself or
+//     is a crosstalk / pickup effect on the physical L-side wiring.
 //   - At each segment edge (plus mid-ZERO) the focused set of ES8388 control
 //     registers is read back and logged so any auto-mute / zero-detect /
 //     mixer changes become visible.
@@ -71,16 +75,17 @@ static inline int16_t dither_lsb() {
     return (g_lfsr & 1u) ? (int16_t)1 : (int16_t)-1;
 }
 
-// Segment kinds. Order is significant: SINE_LR then ZERO give a direct A/B
-// compare, then L_ONLY / R_ONLY isolate per-channel behaviour, DITHER_LR at
-// the end stresses the "non-zero but sub-audible" path.
+// Segment kinds. Order: the original 5 segments establish baseline, then the
+// two PWR_* segments physically disable one HP output pin at a time.
 enum Segment {
     SEG_SINE_LR   = 0,
     SEG_ZERO      = 1,
     SEG_L_ONLY    = 2,
     SEG_R_ONLY    = 3,
     SEG_DITHER_LR = 4,
-    SEG_COUNT     = 5,
+    SEG_PWR_0X20  = 5,  // DACPOWER=0x20 (one side of HP disabled)
+    SEG_PWR_0X10  = 6,  // DACPOWER=0x10 (the other side disabled)
+    SEG_COUNT     = 7,
 };
 
 static const char* segment_name(Segment s) {
@@ -90,6 +95,8 @@ static const char* segment_name(Segment s) {
     case SEG_L_ONLY:    return "L_ONLY   ";
     case SEG_R_ONLY:    return "R_ONLY   ";
     case SEG_DITHER_LR: return "DITHER_LR";
+    case SEG_PWR_0X20:  return "PWR_0x20 ";
+    case SEG_PWR_0X10:  return "PWR_0x10 ";
     case SEG_COUNT:     break;
     }
     return "?";
@@ -132,6 +139,14 @@ static void fill_dither_block() {
     }
 }
 
+// Write one ES8388 register over I2C. Returns true on success.
+static bool es8388_write_reg(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(ES8388_ADDR);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+
 // Read one ES8388 register over I2C. Returns 0xFF if the I2C transaction fails.
 static uint8_t es8388_read_reg(uint8_t reg) {
     Wire.beginTransmission(ES8388_ADDR);
@@ -157,7 +172,7 @@ static void dump_es8388_regs(const char* tag) {
         {0x03, "ADCPOWER     "},
         {0x04, "DACPOWER     "},
         {0x07, "ANAVOLMANAG  "},
-        {0x19, "DACCTRL3(mut)"},  // bit1 DACMute, bit5 DACSoftRamp, bit4 DACLeR
+        {0x19, "DACCTRL3(mut)"},  // DACMute, DACSoftRamp, DACLeR
         {0x1A, "DACCTRL4(Lvl)"},  // DAC left digital volume
         {0x1B, "DACCTRL5(Rvl)"},  // DAC right digital volume
         {0x1D, "DACCTRL7     "},
@@ -165,8 +180,14 @@ static void dump_es8388_regs(const char* tag) {
         {0x1F, "DACCTRL9(swp)"},  // channel swap
         {0x20, "DACCTRL10(Zx)"},  // Zero cross detect / fade
         {0x23, "DACCTRL13    "},
-        {0x26, "DACCTRL16(mx)"},  // Left mixer volume
-        {0x27, "DACCTRL17(mx)"},  // Right mixer volume
+        {0x26, "DACCTRL16(mx)"},
+        {0x27, "DACCTRL17(LD)"},  // LD2LO: DAC L -> L mixer
+        {0x28, "DACCTRL18    "},
+        {0x29, "DACCTRL19    "},
+        {0x2A, "DACCTRL20(RD)"},  // RD2RO: DAC R -> R mixer
+        {0x2B, "DACCTRL21    "},
+        {0x2C, "DACCTRL22    "},
+        {0x2D, "DACCTRL23    "},
         {0x2E, "LOUT1 vol    "},  // DACCONTROL24
         {0x2F, "ROUT1 vol    "},  // DACCONTROL25
         {0x30, "LOUT2 vol    "},  // DACCONTROL26
@@ -228,6 +249,8 @@ static void draw_segment(Segment seg, uint32_t cycle) {
     case SEG_L_ONLY:    color = YELLOW;  break;
     case SEG_R_ONLY:    color = CYAN;    break;
     case SEG_DITHER_LR: color = MAGENTA; break;
+    case SEG_PWR_0X20:  color = ORANGE;  break;
+    case SEG_PWR_0X10:  color = BLUE;    break;
     case SEG_COUNT:     break;
     }
     M5.Display.setTextColor(color);
@@ -321,7 +344,7 @@ void setup() {
     Serial.printf("[i2s] started: fs=%u BCK=%d WS=%d DATA=%d\n",
                   (unsigned)kSampleRate, SYS_I2S_SCLK_PIN, SYS_I2S_LRCK_PIN, SYS_I2S_DOUT_PIN);
 
-    Serial.println("[test] looping: SINE_LR / ZERO / L_ONLY / R_ONLY / DITHER_LR (2s each)");
+    Serial.println("[test] looping: SINE_LR / ZERO / L_ONLY / R_ONLY / DITHER_LR / PWR_0x20 / PWR_0x10 (2s each)");
 
     // One-off post-init dump so we know the quiescent state of the codec.
     dump_es8388_regs("post-init");
@@ -332,6 +355,19 @@ void loop() {
 
     for (int s = 0; s < SEG_COUNT; s++) {
         Segment seg = (Segment)s;
+
+        // Before changing DACPOWER we want PCM to be at a safe state; the
+        // simplest is to rely on ES8388's own "PCM is zero -> silent output"
+        // behaviour observed in earlier runs. We force DACPOWER=0x30 as the
+        // baseline, then per-segment override it for the two PWR_* probes.
+        if (seg == SEG_PWR_0X20) {
+            es8388_write_reg(ES8388_DACPOWER, 0x20);
+        } else if (seg == SEG_PWR_0X10) {
+            es8388_write_reg(ES8388_DACPOWER, 0x10);
+        } else {
+            es8388_write_reg(ES8388_DACPOWER, 0x30);
+        }
+
         draw_segment(seg, cycle);
         Serial.printf("[seg] cycle=%u seg=%s\n", (unsigned)cycle, segment_name(seg));
         log_power_state();
@@ -346,6 +382,8 @@ void loop() {
         for (uint32_t b = 0; b < total_blocks; b++) {
             switch (seg) {
             case SEG_SINE_LR:
+            case SEG_PWR_0X20:
+            case SEG_PWR_0X10:
                 fill_sine_block(true, true);
                 break;
             case SEG_ZERO:
@@ -372,6 +410,8 @@ void loop() {
         // Let M5Unified service buttons/display during long-running writes.
         M5.update();
     }
+    // After the two PWR_* probes, restore full DACPOWER before next cycle.
+    es8388_write_reg(ES8388_DACPOWER, 0x30);
     cycle++;
 }
 
