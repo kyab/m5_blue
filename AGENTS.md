@@ -33,3 +33,13 @@ Triggers that should cause the agent to consult Going-Zero on GitHub:
 ## Build / Flash
 
 - Use PlatformIO (`pio`) for building, uploading, and monitoring. See `.agents/skills/pio-workflow/SKILL.md`.
+
+## Known Hardware Notes
+
+- **Module Audio (ES8388) left-channel hiss**: the LOUT1 output on the Module
+  Audio unit currently in use produces audible hiss whenever the DAC is
+  modulating (i.e. any sample is non-zero). ROUT1 is clean. Evidence and the
+  ruling-out of software causes are documented in
+  `docs/Module-Audio-LOUT1-hiss-investigation.md` (Japanese). Treat this as a
+  hardware-side asymmetry of the specific board; do not spend further effort
+  chasing it in firmware unless the investigation document is revisited.
