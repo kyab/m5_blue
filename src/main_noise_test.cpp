@@ -324,6 +324,39 @@ void setup() {
         Serial.printf("[es8388] DACCONTROL3=0x%02X (unmute, SoftRamp on)\n", reg25);
     }
 
+    // Disable LI2LO / RI2RO analog bypass so floating LINPUT/RINPUT (e.g. unconnected
+    // mic pin on a TRRS earphone) cannot leak noise into the HP output mixer.
+    // DACCONTROL17 (0x27) bit6 = LI2LO: Left-Input -> Left-Out bypass. Default 0xD0
+    // from Module-Audio init => LD2LO=1, LI2LO=1. Clearing bit6 gives 0x90 (LD2LO only).
+    // DACCONTROL20 (0x2A) bit6 = RI2RO: symmetric for the right channel.
+    // Using RMW to preserve reserved bits.
+    {
+        uint8_t reg27 = 0;
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL17);
+        Wire.endTransmission(false);
+        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) reg27 = Wire.read();
+        uint8_t reg27_new = reg27 & ~0x40u;
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL17);
+        Wire.write(reg27_new);
+        Wire.endTransmission();
+
+        uint8_t reg2a = 0;
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL20);
+        Wire.endTransmission(false);
+        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) reg2a = Wire.read();
+        uint8_t reg2a_new = reg2a & ~0x40u;
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL20);
+        Wire.write(reg2a_new);
+        Wire.endTransmission();
+
+        Serial.printf("[es8388] DACCONTROL17: 0x%02X -> 0x%02X (LI2LO disabled)\n", reg27, reg27_new);
+        Serial.printf("[es8388] DACCONTROL20: 0x%02X -> 0x%02X (RI2RO disabled)\n", reg2a, reg2a_new);
+    }
+
     // MCLK on GPIO0 (required for ES8388)
     PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
     WRITE_PERI_REG(PIN_CTRL, 0xFFF0);
