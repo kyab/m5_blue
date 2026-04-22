@@ -600,6 +600,46 @@ void setup() {
     }
     startup_step("S07", "DAC_SoftRamp");
 
+    // Disable LI2LO / RI2RO analog bypass in the ES8388 output mixer. The Module-Audio
+    // driver init() leaves these enabled (DACCONTROL17/20 = 0xD0 => LD2LO=1, LI2LO=1),
+    // which routes LINPUT/RINPUT directly into the HP output mixer. On Module Audio,
+    // LIN1 is wired (via Q1 + R8/R9) to the TRRS jack MIC contact; with a plain TRRS
+    // earphone (no mic) that pin is floating and picks up digital noise, producing a
+    // left-only hiss. Plugging a TRS plug shorts MIC to GND and the hiss disappears.
+    // Clearing bit6 (LI2LO / RI2RO) on both registers removes the leak path entirely.
+    // Verified on the noise-test build; see src/main_noise_test.cpp.
+    {
+        uint8_t reg27 = 0x00;
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL17);
+        Wire.endTransmission(false);
+        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
+            reg27 = Wire.read();
+        }
+        uint8_t reg27_new = reg27 & ~0x40u;
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL17);
+        Wire.write(reg27_new);
+        Wire.endTransmission();
+
+        uint8_t reg2a = 0x00;
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL20);
+        Wire.endTransmission(false);
+        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
+            reg2a = Wire.read();
+        }
+        uint8_t reg2a_new = reg2a & ~0x40u;
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL20);
+        Wire.write(reg2a_new);
+        Wire.endTransmission();
+
+        ESP_LOGI("main", "ES8388 DACCONTROL17: 0x%02X -> 0x%02X (LI2LO disabled)", reg27, reg27_new);
+        ESP_LOGI("main", "ES8388 DACCONTROL20: 0x%02X -> 0x%02X (RI2RO disabled)", reg2a, reg2a_new);
+    }
+    startup_step("S07b", "DAC_Mixer_Bypass_Off");
+
     // Configure MCLK output on GPIO0 (required for ES8388)
     ESP_LOGI("main", "Configuring MCLK output on GPIO0...");
     PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
