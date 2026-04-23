@@ -34,6 +34,12 @@ Triggers that should cause the agent to consult Going-Zero on GitHub:
 
 - Use PlatformIO (`pio`) for building, uploading, and monitoring. See `.agents/skills/pio-workflow/SKILL.md`.
 
+## Default PlatformIO Source Target
+
+- Unless the user explicitly specifies another environment or file, treat the source scope as the default PlatformIO environment in `platformio.ini` (`[platformio] default_envs`).
+- In this repository, the default environment is `m5stack-core2`, so prioritize edits and verification against that environment's effective source set (`build_src_filter = +<*> -<main_noise_test.cpp>`).
+- Only switch to other environment-specific sources (for example `main_noise_test.cpp`) when the user explicitly requests that target.
+
 ## Known Hardware Notes
 
 - **Module Audio (ES8388) left-channel hiss**: the LOUT1 output on the Module
