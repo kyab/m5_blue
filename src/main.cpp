@@ -88,7 +88,7 @@ static float s_dj_right[kMaxCallbackSamples];
 //   sees garbage or repeated samples.
 //
 static const uint32_t kSampleRate = 44100;
-static const size_t kFeedRingBufBytes = (kSampleRate * 2 * 2) / 5; // 200 ms stereo 16-bit
+static const size_t kFeedRingBufBytes = (kSampleRate * 2 * 2) / 20; // 50 ms stereo 16-bit
 static const size_t kSilenceChunkBytes = 1024;                     // ~5.8 ms at 44.1k stereo; write at least this often
 // After underrun we output silence; when callback resumes, 0→audio step causes a pop.
 // Apply a short fade-in over the first N samples of real audio (in the feed task).
