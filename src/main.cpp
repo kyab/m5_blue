@@ -7,6 +7,7 @@
 #include "BluetoothA2DPSink.h"
 #include "RingBuffer.hpp"
 #include "DJFilter.hpp"
+#include "esp_random.h"
 #include <cmath>
 
 // MCLK output configuration (required for ES8388)
@@ -67,6 +68,14 @@ static float s_dj_left[kMaxCallbackSamples];
 static float s_dj_right[kMaxCallbackSamples];
 
 static const uint32_t kSampleRate = 44100;
+
+// When the A2DP source sends long runs of digital silence (pause, track gap, app mute),
+// some DAC paths treat "all zero" PCM as an idle state and create audible clicks at
+// resume. If a block's peak is below this threshold, mix in sub-audible TPDF dither
+// so the I2S stream never stays stuck at exact zero.
+static const int32_t kSilenceDitherPeakThreshold = 16;  // |int16| peak per block
+static const int32_t kSilenceDitherLsbScale = 2;        // ~2 LSB RMS; >>15 after TPDF
+
 volatile esp_a2d_connection_state_t g_bt_connection_state = ESP_A2D_CONNECTION_STATE_DISCONNECTED;
 volatile bool g_bt_state_display_dirty = true;
 
@@ -147,6 +156,35 @@ void audio_callback(int16_t* data, uint32_t sample_num) {
             else if (r < -32768.0f) r = -32768.0f;
             data[i * 2] = static_cast<int16_t>(l);
             data[i * 2 + 1] = static_cast<int16_t>(r);
+        }
+    }
+
+    // Idle-zero prevention: add uncorrelated TPDF dither only for (near-)silent blocks.
+    {
+        int32_t peak = 0;
+        const uint32_t total = sample_num * 2u;
+        for (uint32_t i = 0; i < total; i++) {
+            int32_t s = data[i];
+            if (s < 0) s = -s;
+            if (s > peak) peak = s;
+        }
+        if (peak <= kSilenceDitherPeakThreshold) {
+            for (uint32_t i = 0; i < sample_num; i++) {
+                uint32_t wL = esp_random();
+                uint32_t wR = esp_random();
+                int32_t dL = (int32_t)(wL & 0x7FFFu) - (int32_t)((wL >> 15) & 0x7FFFu);
+                int32_t dR = (int32_t)(wR & 0x7FFFu) - (int32_t)((wR >> 15) & 0x7FFFu);
+                int32_t addL = (dL * kSilenceDitherLsbScale) >> 15;
+                int32_t addR = (dR * kSilenceDitherLsbScale) >> 15;
+                int32_t nl = (int32_t)data[i * 2] + addL;
+                int32_t nr = (int32_t)data[i * 2 + 1] + addR;
+                if (nl > 32767) nl = 32767;
+                else if (nl < -32768) nl = -32768;
+                if (nr > 32767) nr = 32767;
+                else if (nr < -32768) nr = -32768;
+                data[i * 2] = static_cast<int16_t>(nl);
+                data[i * 2 + 1] = static_cast<int16_t>(nr);
+            }
         }
     }
 
