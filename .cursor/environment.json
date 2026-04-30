@@ -1,0 +1,5 @@
+{
+  "name": "m5_blue Cloud Agent",
+  "install": "python3 -m pip install --user --upgrade platformio && if ! grep -Fq 'export PATH=\"$HOME/.local/bin:$PATH\"' \"$HOME/.profile\"; then echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> \"$HOME/.profile\"; fi && if command -v sudo >/dev/null 2>&1; then sudo ln -sf \"$HOME/.local/bin/pio\" /usr/local/bin/pio && sudo ln -sf \"$HOME/.local/bin/platformio\" /usr/local/bin/platformio; fi",
+  "start": "export PATH=\"$HOME/.local/bin:$PATH\" && pio --version"
+}
