@@ -90,9 +90,12 @@ static const uint32_t kSampleRate = 44100;
 // so the I2S stream never stays stuck at exact zero.
 static const int32_t kSilenceDitherPeakThreshold = 16;  // |int16| peak per block
 static const int32_t kSilenceDitherLsbScale = 2;        // ~2 LSB RMS; >>15 after TPDF
+static const uint32_t kIdleDitherFrames = 768;           // ~17 ms at 44.1 kHz; enough to pace loop writes
 
 volatile esp_a2d_connection_state_t g_bt_connection_state = ESP_A2D_CONNECTION_STATE_DISCONNECTED;
+volatile esp_a2d_audio_state_t g_a2dp_audio_state = ESP_A2D_AUDIO_STATE_STOPPED;
 volatile bool g_bt_state_display_dirty = true;
+static int16_t s_idle_dither_block[kIdleDitherFrames * 2];
 
 static void update_bt_status_display() {
     if (!g_bt_state_display_dirty) return;
@@ -120,6 +123,46 @@ static void startup_step(const char* step_id, const char* step_name) {
     delay(kStartupStepDelayMs);
 }
 // #endregion
+
+static inline int16_t make_tpdf_dither_sample() {
+    uint32_t w = esp_random();
+    int32_t d = (int32_t)(w & 0x7FFFu) - (int32_t)((w >> 15) & 0x7FFFu);
+    return static_cast<int16_t>((d * kSilenceDitherLsbScale) >> 15);
+}
+
+static void add_silence_dither_if_needed(int16_t* data, uint32_t sample_num) {
+    int32_t peak = 0;
+    const uint32_t total = sample_num * 2u;
+    for (uint32_t i = 0; i < total; i++) {
+        int32_t s = data[i];
+        if (s < 0) s = -s;
+        if (s > peak) peak = s;
+    }
+    if (peak > kSilenceDitherPeakThreshold) return;
+
+    for (uint32_t i = 0; i < sample_num; i++) {
+        int32_t nl = (int32_t)data[i * 2] + make_tpdf_dither_sample();
+        int32_t nr = (int32_t)data[i * 2 + 1] + make_tpdf_dither_sample();
+        if (nl > 32767) nl = 32767;
+        else if (nl < -32768) nl = -32768;
+        if (nr > 32767) nr = 32767;
+        else if (nr < -32768) nr = -32768;
+        data[i * 2] = static_cast<int16_t>(nl);
+        data[i * 2 + 1] = static_cast<int16_t>(nr);
+    }
+}
+
+static bool feed_idle_dither_if_needed() {
+    if (g_bt_connection_state != ESP_A2D_CONNECTION_STATE_CONNECTED) return false;
+    if (g_a2dp_audio_state == ESP_A2D_AUDIO_STATE_STARTED) return false;
+
+    for (uint32_t i = 0; i < kIdleDitherFrames; i++) {
+        s_idle_dither_block[i * 2] = make_tpdf_dither_sample();
+        s_idle_dither_block[i * 2 + 1] = make_tpdf_dither_sample();
+    }
+    i2s.write(reinterpret_cast<const uint8_t*>(s_idle_dither_block), sizeof(s_idle_dither_block));
+    return true;
+}
 
 // Audio callback - process in-place; ESP32-A2DP writes the modified buffer to I2S.
 void audio_callback(int16_t* data, uint32_t sample_num) {
@@ -175,33 +218,7 @@ void audio_callback(int16_t* data, uint32_t sample_num) {
     }
 
     // Idle-zero prevention: add uncorrelated TPDF dither only for (near-)silent blocks.
-    {
-        int32_t peak = 0;
-        const uint32_t total = sample_num * 2u;
-        for (uint32_t i = 0; i < total; i++) {
-            int32_t s = data[i];
-            if (s < 0) s = -s;
-            if (s > peak) peak = s;
-        }
-        if (peak <= kSilenceDitherPeakThreshold) {
-            for (uint32_t i = 0; i < sample_num; i++) {
-                uint32_t wL = esp_random();
-                uint32_t wR = esp_random();
-                int32_t dL = (int32_t)(wL & 0x7FFFu) - (int32_t)((wL >> 15) & 0x7FFFu);
-                int32_t dR = (int32_t)(wR & 0x7FFFu) - (int32_t)((wR >> 15) & 0x7FFFu);
-                int32_t addL = (dL * kSilenceDitherLsbScale) >> 15;
-                int32_t addR = (dR * kSilenceDitherLsbScale) >> 15;
-                int32_t nl = (int32_t)data[i * 2] + addL;
-                int32_t nr = (int32_t)data[i * 2 + 1] + addR;
-                if (nl > 32767) nl = 32767;
-                else if (nl < -32768) nl = -32768;
-                if (nr > 32767) nr = 32767;
-                else if (nr < -32768) nr = -32768;
-                data[i * 2] = static_cast<int16_t>(nl);
-                data[i * 2 + 1] = static_cast<int16_t>(nr);
-            }
-        }
-    }
+    add_silence_dither_if_needed(data, sample_num);
 
     static uint32_t processed_samples = 0;
     processed_samples += sample_num;
@@ -223,6 +240,7 @@ void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
 // #region agent log
 void audio_state_callback_debug(esp_a2d_audio_state_t state, void* obj) {
     (void)obj;
+    g_a2dp_audio_state = state;
     static char s_dbg[48];
     snprintf(s_dbg, sizeof(s_dbg), "{\"state\":%d}", (int)state);
     DEBUG_LOG("H5", "a2dp_audio_state", s_dbg);
@@ -545,6 +563,10 @@ void loop() {
         }
     }
 
-    // Small delay to prevent tight loop
-    delay(10);
+    // During A2DP suspend/stop the raw callback is not called, so feed a tiny
+    // dither stream here to keep the DAC from seeing idle/underrun silence.
+    bool idle_dither_fed = feed_idle_dither_if_needed();
+
+    // Small delay to prevent tight loop. Idle dither writes are already paced by I2S.
+    delay(idle_dither_fed ? 1 : 10);
 }
