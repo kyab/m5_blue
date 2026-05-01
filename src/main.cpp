@@ -50,8 +50,23 @@ ES8388 es8388(&Wire, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN);
 // I2SStream for audio output (managed by A2DP library)
 I2SStream i2s;
 
+class BluetoothA2DPSinkKeepI2S : public BluetoothA2DPSink {
+public:
+    using BluetoothA2DPSink::BluetoothA2DPSink;
+
+protected:
+    void set_i2s_active(bool active) override {
+        if (active) {
+            BluetoothA2DPSink::set_i2s_active(true);
+        } else {
+            // Keep I2S running on remote pause/stop to avoid DAC stop/start pops.
+            ESP_LOGI("a2dp", "ignore set_i2s_active(false): keep I2S active");
+        }
+    }
+};
+
 // Bluetooth A2DP Sink with I2SStream
-BluetoothA2DPSink a2dp_sink(i2s);
+BluetoothA2DPSinkKeepI2S a2dp_sink(i2s);
 
 // Ring buffer for delay effect
 RingBufferInterleaved* g_ring = nullptr;
