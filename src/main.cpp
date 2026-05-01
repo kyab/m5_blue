@@ -8,7 +8,11 @@
 #include "RingBuffer.hpp"
 #include "DJFilter.hpp"
 #include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 
 // MCLK output configuration (required for ES8388)
 #include "soc/io_mux_reg.h"
@@ -47,8 +51,95 @@ AudioI2c device;
 // ES8388 codec
 ES8388 es8388(&Wire, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN);
 
-// I2SStream for audio output (managed by A2DP library)
+static const uint32_t kSampleRate = 44100;
+
+// I2SStream for audio output (fed by a single writer task)
 I2SStream i2s;
+
+static const uint32_t kI2SWriterFrames = 256;       // ~5.8 ms at 44.1 kHz; caps resume latency
+static const size_t kBtPcmRingBytes = 8192;         // ~46 ms stereo 16-bit queue; old data is dropped on overflow
+static uint8_t s_bt_pcm_ring[kBtPcmRingBytes];
+static size_t s_bt_pcm_head = 0;
+static size_t s_bt_pcm_tail = 0;
+static size_t s_bt_pcm_used = 0;
+static portMUX_TYPE s_bt_pcm_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t s_i2s_writer_bytes[kI2SWriterFrames * 2 * sizeof(int16_t)];
+static TaskHandle_t s_i2s_writer_task = nullptr;
+
+static inline size_t frame_align_bytes(size_t bytes) {
+    return bytes & ~(size_t)(2 * sizeof(int16_t) - 1);
+}
+
+static void bt_pcm_ring_drop_locked(size_t bytes) {
+    bytes = frame_align_bytes(bytes);
+    if (bytes > s_bt_pcm_used) bytes = s_bt_pcm_used;
+    s_bt_pcm_tail = (s_bt_pcm_tail + bytes) % kBtPcmRingBytes;
+    s_bt_pcm_used -= bytes;
+}
+
+static size_t bt_pcm_ring_push(const uint8_t* data, size_t len) {
+    len = frame_align_bytes(len);
+    if (len == 0) return 0;
+    if (len > kBtPcmRingBytes) {
+        data += len - kBtPcmRingBytes;
+        len = kBtPcmRingBytes;
+    }
+
+    portENTER_CRITICAL(&s_bt_pcm_mux);
+    size_t free_bytes = kBtPcmRingBytes - s_bt_pcm_used;
+    if (free_bytes < len) {
+        // Keep latency bounded on resume by dropping stale decoded PCM first.
+        bt_pcm_ring_drop_locked(len - free_bytes);
+    }
+
+    size_t first = std::min(len, kBtPcmRingBytes - s_bt_pcm_head);
+    memcpy(s_bt_pcm_ring + s_bt_pcm_head, data, first);
+    if (len > first) {
+        memcpy(s_bt_pcm_ring, data + first, len - first);
+    }
+    s_bt_pcm_head = (s_bt_pcm_head + len) % kBtPcmRingBytes;
+    s_bt_pcm_used += len;
+    portEXIT_CRITICAL(&s_bt_pcm_mux);
+    return len;
+}
+
+static size_t bt_pcm_ring_pop(uint8_t* data, size_t max_len) {
+    max_len = frame_align_bytes(max_len);
+    portENTER_CRITICAL(&s_bt_pcm_mux);
+    size_t len = std::min(max_len, s_bt_pcm_used);
+    len = frame_align_bytes(len);
+    if (len > 0) {
+        size_t first = std::min(len, kBtPcmRingBytes - s_bt_pcm_tail);
+        memcpy(data, s_bt_pcm_ring + s_bt_pcm_tail, first);
+        if (len > first) {
+            memcpy(data + first, s_bt_pcm_ring, len - first);
+        }
+        s_bt_pcm_tail = (s_bt_pcm_tail + len) % kBtPcmRingBytes;
+        s_bt_pcm_used -= len;
+    }
+    portEXIT_CRITICAL(&s_bt_pcm_mux);
+    return len;
+}
+
+class BluetoothA2DPOutputQueuedI2S : public BluetoothA2DPOutput {
+public:
+    bool begin() override { return true; }
+    void end() override {}
+    void set_sample_rate(int rate) override {
+        if (rate != (int)kSampleRate) {
+            ESP_LOGW("a2dp", "A2DP sample rate %d differs from fixed I2S rate %lu", rate, (unsigned long)kSampleRate);
+        }
+    }
+    void set_output_active(bool active) override {
+        ESP_LOGI("a2dp", "queued output active=%d (I2S writer stays running)", active);
+    }
+    size_t write(const uint8_t* data, size_t len) override {
+        bt_pcm_ring_push(data, len);
+        return len; // Do not block the A2DP callback on I2S back-pressure.
+    }
+};
+
+static BluetoothA2DPOutputQueuedI2S a2dp_output;
 
 class BluetoothA2DPSinkKeepI2S : public BluetoothA2DPSink {
 public:
@@ -66,7 +157,7 @@ protected:
 };
 
 // Bluetooth A2DP Sink with I2SStream
-BluetoothA2DPSinkKeepI2S a2dp_sink(i2s);
+BluetoothA2DPSinkKeepI2S a2dp_sink(a2dp_output);
 
 // Ring buffer for delay effect
 RingBufferInterleaved* g_ring = nullptr;
@@ -82,23 +173,16 @@ static const uint32_t kMaxCallbackSamples = 1024;
 static float s_dj_left[kMaxCallbackSamples];
 static float s_dj_right[kMaxCallbackSamples];
 
-static const uint32_t kSampleRate = 44100;
-
 // When the A2DP source sends long runs of digital silence (pause, track gap, app mute),
 // some DAC paths treat "all zero" PCM as an idle state and create audible clicks at
 // resume. If a block's peak is below this threshold, mix in sub-audible TPDF dither
 // so the I2S stream never stays stuck at exact zero.
 static const int32_t kSilenceDitherPeakThreshold = 16;  // |int16| peak per block
 static const int32_t kSilenceDitherLsbScale = 2;        // ~2 LSB RMS; >>15 after TPDF
-static const uint32_t kIdleDitherFrames = 32;            // ~0.7 ms at 44.1 kHz; minimize resume backlog
-static const uint32_t kIdleDitherBurstIntervalMs = 80;   // Keepalive burst, not continuous idle streaming
-static const uint32_t kIdleDitherCallbackGuardMs = 250;  // Prefer real A2DP PCM around resume
 
 volatile esp_a2d_connection_state_t g_bt_connection_state = ESP_A2D_CONNECTION_STATE_DISCONNECTED;
 volatile esp_a2d_audio_state_t g_a2dp_audio_state = ESP_A2D_AUDIO_STATE_STOPPED;
 volatile bool g_bt_state_display_dirty = true;
-volatile uint32_t g_last_audio_callback_ms = 0;
-static int16_t s_idle_dither_block[kIdleDitherFrames * 2];
 
 static void update_bt_status_display() {
     if (!g_bt_state_display_dirty) return;
@@ -133,6 +217,14 @@ static inline int16_t make_tpdf_dither_sample() {
     return static_cast<int16_t>((d * kSilenceDitherLsbScale) >> 15);
 }
 
+static void fill_dither_bytes(uint8_t* data, size_t bytes) {
+    int16_t* samples = reinterpret_cast<int16_t*>(data);
+    size_t sample_count = bytes / sizeof(int16_t);
+    for (size_t i = 0; i < sample_count; i++) {
+        samples[i] = make_tpdf_dither_sample();
+    }
+}
+
 static void add_silence_dither_if_needed(int16_t* data, uint32_t sample_num) {
     int32_t peak = 0;
     const uint32_t total = sample_num * 2u;
@@ -155,29 +247,21 @@ static void add_silence_dither_if_needed(int16_t* data, uint32_t sample_num) {
     }
 }
 
-static bool feed_idle_dither_if_needed() {
-    if (g_bt_connection_state != ESP_A2D_CONNECTION_STATE_CONNECTED) return false;
-    if (g_a2dp_audio_state == ESP_A2D_AUDIO_STATE_STARTED) return false;
-
-    uint32_t now_ms = (uint32_t)millis();
-    if (now_ms - g_last_audio_callback_ms < kIdleDitherCallbackGuardMs) return false;
-
-    static uint32_t s_last_idle_feed_ms = 0;
-    if (now_ms - s_last_idle_feed_ms < kIdleDitherBurstIntervalMs) return false;
-    s_last_idle_feed_ms = now_ms;
-
-    for (uint32_t i = 0; i < kIdleDitherFrames; i++) {
-        s_idle_dither_block[i * 2] = make_tpdf_dither_sample();
-        s_idle_dither_block[i * 2 + 1] = make_tpdf_dither_sample();
+static void i2s_writer_task(void* arg) {
+    (void)arg;
+    const size_t block_bytes = sizeof(s_i2s_writer_bytes);
+    ESP_LOGI("i2s_writer", "task started: block=%u bytes", (unsigned)block_bytes);
+    for (;;) {
+        size_t got = bt_pcm_ring_pop(s_i2s_writer_bytes, block_bytes);
+        if (got < block_bytes) {
+            fill_dither_bytes(s_i2s_writer_bytes + got, block_bytes - got);
+        }
+        i2s.write(s_i2s_writer_bytes, block_bytes);
     }
-    i2s.write(reinterpret_cast<const uint8_t*>(s_idle_dither_block), sizeof(s_idle_dither_block));
-    return true;
 }
 
 // Audio callback - process in-place; ESP32-A2DP writes the modified buffer to I2S.
 void audio_callback(int16_t* data, uint32_t sample_num) {
-    g_last_audio_callback_ms = (uint32_t)millis();
-
     static bool first_call = true;
     if (first_call) {
         ESP_LOGI("audio", "*** audio_callback FIRST CALL *** samples=%lu", sample_num);
@@ -433,6 +517,13 @@ void setup() {
              SYS_I2S_SCLK_PIN, SYS_I2S_LRCK_PIN, SYS_I2S_DOUT_PIN);
     startup_step("S12", "i2s.begin");
 
+    if (s_i2s_writer_task == nullptr) {
+        BaseType_t task_ok = xTaskCreatePinnedToCore(i2s_writer_task, "I2SWriter", 4096, nullptr, 3, &s_i2s_writer_task, 1);
+        if (task_ok != pdPASS) {
+            ESP_LOGE("main", "Failed to start I2S writer task");
+        }
+    }
+
     // Setup A2DP callbacks
     a2dp_sink.set_on_connection_state_changed(connection_state_callback);
     a2dp_sink.set_on_audio_state_changed(audio_state_callback_debug, nullptr);
@@ -575,10 +666,6 @@ void loop() {
         }
     }
 
-    // During A2DP suspend/stop the raw callback is not called, so feed a tiny
-    // dither stream here to keep the DAC from seeing idle/underrun silence.
-    bool idle_dither_fed = feed_idle_dither_if_needed();
-
-    // Small delay to prevent tight loop. Idle feeder pacing is handled by micros().
-    delay(idle_dither_fed ? 1 : 10);
+    // Small delay to prevent tight loop.
+    delay(10);
 }
