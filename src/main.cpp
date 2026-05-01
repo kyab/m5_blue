@@ -90,11 +90,14 @@ static const uint32_t kSampleRate = 44100;
 // so the I2S stream never stays stuck at exact zero.
 static const int32_t kSilenceDitherPeakThreshold = 16;  // |int16| peak per block
 static const int32_t kSilenceDitherLsbScale = 2;        // ~2 LSB RMS; >>15 after TPDF
-static const uint32_t kIdleDitherFrames = 768;           // ~17 ms at 44.1 kHz; enough to pace loop writes
+static const uint32_t kIdleDitherFrames = 128;           // ~2.9 ms at 44.1 kHz; keep resume backlog small
+static const uint32_t kIdleDitherMinIntervalUs = 2000;   // Slightly below one idle block duration
+static const uint32_t kIdleDitherCallbackGuardMs = 120;  // Prefer real A2DP PCM around resume
 
 volatile esp_a2d_connection_state_t g_bt_connection_state = ESP_A2D_CONNECTION_STATE_DISCONNECTED;
 volatile esp_a2d_audio_state_t g_a2dp_audio_state = ESP_A2D_AUDIO_STATE_STOPPED;
 volatile bool g_bt_state_display_dirty = true;
+volatile uint32_t g_last_audio_callback_ms = 0;
 static int16_t s_idle_dither_block[kIdleDitherFrames * 2];
 
 static void update_bt_status_display() {
@@ -156,6 +159,14 @@ static bool feed_idle_dither_if_needed() {
     if (g_bt_connection_state != ESP_A2D_CONNECTION_STATE_CONNECTED) return false;
     if (g_a2dp_audio_state == ESP_A2D_AUDIO_STATE_STARTED) return false;
 
+    uint32_t now_ms = (uint32_t)millis();
+    if (now_ms - g_last_audio_callback_ms < kIdleDitherCallbackGuardMs) return false;
+
+    static uint32_t s_last_idle_feed_us = 0;
+    uint32_t now_us = (uint32_t)micros();
+    if (now_us - s_last_idle_feed_us < kIdleDitherMinIntervalUs) return false;
+    s_last_idle_feed_us = now_us;
+
     for (uint32_t i = 0; i < kIdleDitherFrames; i++) {
         s_idle_dither_block[i * 2] = make_tpdf_dither_sample();
         s_idle_dither_block[i * 2 + 1] = make_tpdf_dither_sample();
@@ -166,6 +177,8 @@ static bool feed_idle_dither_if_needed() {
 
 // Audio callback - process in-place; ESP32-A2DP writes the modified buffer to I2S.
 void audio_callback(int16_t* data, uint32_t sample_num) {
+    g_last_audio_callback_ms = (uint32_t)millis();
+
     static bool first_call = true;
     if (first_call) {
         ESP_LOGI("audio", "*** audio_callback FIRST CALL *** samples=%lu", sample_num);
@@ -567,6 +580,6 @@ void loop() {
     // dither stream here to keep the DAC from seeing idle/underrun silence.
     bool idle_dither_fed = feed_idle_dither_if_needed();
 
-    // Small delay to prevent tight loop. Idle dither writes are already paced by I2S.
+    // Small delay to prevent tight loop. Idle feeder pacing is handled by micros().
     delay(idle_dither_fed ? 1 : 10);
 }
