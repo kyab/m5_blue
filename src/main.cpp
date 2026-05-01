@@ -90,9 +90,9 @@ static const uint32_t kSampleRate = 44100;
 // so the I2S stream never stays stuck at exact zero.
 static const int32_t kSilenceDitherPeakThreshold = 16;  // |int16| peak per block
 static const int32_t kSilenceDitherLsbScale = 2;        // ~2 LSB RMS; >>15 after TPDF
-static const uint32_t kIdleDitherFrames = 128;           // ~2.9 ms at 44.1 kHz; keep resume backlog small
-static const uint32_t kIdleDitherMinIntervalUs = 2000;   // Slightly below one idle block duration
-static const uint32_t kIdleDitherCallbackGuardMs = 120;  // Prefer real A2DP PCM around resume
+static const uint32_t kIdleDitherFrames = 32;            // ~0.7 ms at 44.1 kHz; minimize resume backlog
+static const uint32_t kIdleDitherBurstIntervalMs = 80;   // Keepalive burst, not continuous idle streaming
+static const uint32_t kIdleDitherCallbackGuardMs = 250;  // Prefer real A2DP PCM around resume
 
 volatile esp_a2d_connection_state_t g_bt_connection_state = ESP_A2D_CONNECTION_STATE_DISCONNECTED;
 volatile esp_a2d_audio_state_t g_a2dp_audio_state = ESP_A2D_AUDIO_STATE_STOPPED;
@@ -162,10 +162,9 @@ static bool feed_idle_dither_if_needed() {
     uint32_t now_ms = (uint32_t)millis();
     if (now_ms - g_last_audio_callback_ms < kIdleDitherCallbackGuardMs) return false;
 
-    static uint32_t s_last_idle_feed_us = 0;
-    uint32_t now_us = (uint32_t)micros();
-    if (now_us - s_last_idle_feed_us < kIdleDitherMinIntervalUs) return false;
-    s_last_idle_feed_us = now_us;
+    static uint32_t s_last_idle_feed_ms = 0;
+    if (now_ms - s_last_idle_feed_ms < kIdleDitherBurstIntervalMs) return false;
+    s_last_idle_feed_ms = now_ms;
 
     for (uint32_t i = 0; i < kIdleDitherFrames; i++) {
         s_idle_dither_block[i * 2] = make_tpdf_dither_sample();
