@@ -58,6 +58,7 @@ I2SStream i2s;
 
 static const uint32_t kI2SWriterFrames = 256;       // ~5.8 ms at 44.1 kHz; caps resume latency
 static const size_t kBtPcmRingBytes = 8192;         // ~46 ms stereo 16-bit queue; old data is dropped on overflow
+static const size_t kBtPcmPrebufferBytes = 4096;    // ~23 ms: absorb A2DP jitter before draining real PCM
 static uint8_t s_bt_pcm_ring[kBtPcmRingBytes];
 static size_t s_bt_pcm_head = 0;
 static size_t s_bt_pcm_tail = 0;
@@ -119,6 +120,21 @@ static size_t bt_pcm_ring_pop(uint8_t* data, size_t max_len) {
     }
     portEXIT_CRITICAL(&s_bt_pcm_mux);
     return len;
+}
+
+static size_t bt_pcm_ring_used() {
+    portENTER_CRITICAL(&s_bt_pcm_mux);
+    size_t used = s_bt_pcm_used;
+    portEXIT_CRITICAL(&s_bt_pcm_mux);
+    return used;
+}
+
+static void bt_pcm_ring_clear() {
+    portENTER_CRITICAL(&s_bt_pcm_mux);
+    s_bt_pcm_head = 0;
+    s_bt_pcm_tail = 0;
+    s_bt_pcm_used = 0;
+    portEXIT_CRITICAL(&s_bt_pcm_mux);
 }
 
 class BluetoothA2DPOutputQueuedI2S : public BluetoothA2DPOutput {
@@ -250,11 +266,37 @@ static void add_silence_dither_if_needed(int16_t* data, uint32_t sample_num) {
 static void i2s_writer_task(void* arg) {
     (void)arg;
     const size_t block_bytes = sizeof(s_i2s_writer_bytes);
+    bool draining_bt_pcm = false;
     ESP_LOGI("i2s_writer", "task started: block=%u bytes", (unsigned)block_bytes);
     for (;;) {
-        size_t got = bt_pcm_ring_pop(s_i2s_writer_bytes, block_bytes);
-        if (got < block_bytes) {
-            fill_dither_bytes(s_i2s_writer_bytes + got, block_bytes - got);
+        bool write_bt_pcm = false;
+        if (g_a2dp_audio_state == ESP_A2D_AUDIO_STATE_STARTED) {
+            size_t queued = bt_pcm_ring_used();
+            if (!draining_bt_pcm) {
+                if (queued >= kBtPcmPrebufferBytes) {
+                    draining_bt_pcm = true;
+                }
+            }
+            if (draining_bt_pcm) {
+                if (queued >= block_bytes) {
+                    write_bt_pcm = true;
+                } else {
+                    // Do not splice short PCM tails with dither; rebuffer to absorb A2DP jitter.
+                    draining_bt_pcm = false;
+                }
+            }
+        } else {
+            draining_bt_pcm = false;
+        }
+
+        if (write_bt_pcm) {
+            size_t got = bt_pcm_ring_pop(s_i2s_writer_bytes, block_bytes);
+            if (got != block_bytes) {
+                draining_bt_pcm = false;
+                fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
+            }
+        } else {
+            fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
         }
         i2s.write(s_i2s_writer_bytes, block_bytes);
     }
@@ -337,6 +379,9 @@ void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
 void audio_state_callback_debug(esp_a2d_audio_state_t state, void* obj) {
     (void)obj;
     g_a2dp_audio_state = state;
+    if (state != ESP_A2D_AUDIO_STATE_STARTED) {
+        bt_pcm_ring_clear();
+    }
     static char s_dbg[48];
     snprintf(s_dbg, sizeof(s_dbg), "{\"state\":%d}", (int)state);
     DEBUG_LOG("H5", "a2dp_audio_state", s_dbg);
