@@ -57,8 +57,9 @@ static const uint32_t kSampleRate = 44100;
 I2SStream i2s;
 
 static const uint32_t kI2SWriterFrames = 256;       // ~5.8 ms at 44.1 kHz; caps resume latency
-static const size_t kBtPcmRingBytes = 8192;         // ~46 ms stereo 16-bit queue; old data is dropped on overflow
-static const size_t kBtPcmPrebufferBytes = 4096;    // ~23 ms: absorb A2DP jitter before draining real PCM
+static const size_t kBtPcmRingBytes = 32768;        // ~186 ms stereo 16-bit queue; absorbs A2DP burst jitter
+static const size_t kBtPcmPrebufferBytes = 8192;    // ~46 ms: absorb A2DP jitter before first PCM drain
+static const uint32_t kBtPcmPushWaitMs = 20;        // Restore bounded back-pressure before dropping PCM
 static uint8_t s_bt_pcm_ring[kBtPcmRingBytes];
 static size_t s_bt_pcm_head = 0;
 static size_t s_bt_pcm_tail = 0;
@@ -201,10 +202,20 @@ static size_t bt_pcm_ring_push(const uint8_t* data, size_t len) {
         len = kBtPcmRingBytes;
     }
 
+    uint32_t wait_start_ms = (uint32_t)millis();
+    for (;;) {
+        portENTER_CRITICAL(&s_bt_pcm_mux);
+        size_t free_bytes = kBtPcmRingBytes - s_bt_pcm_used;
+        portEXIT_CRITICAL(&s_bt_pcm_mux);
+        if (free_bytes >= len) break;
+        if ((uint32_t)millis() - wait_start_ms >= kBtPcmPushWaitMs) break;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
     portENTER_CRITICAL(&s_bt_pcm_mux);
     size_t free_bytes = kBtPcmRingBytes - s_bt_pcm_used;
     if (free_bytes < len) {
-        // Keep latency bounded on resume by dropping stale decoded PCM first.
+        // Last resort: keep latency bounded if Bluetooth still outruns I2S after bounded back-pressure.
         stats_note_ring_drop(len - free_bytes);
         bt_pcm_ring_drop_locked(len - free_bytes);
     }
@@ -399,8 +410,8 @@ static void i2s_writer_task(void* arg) {
                 if (queued >= block_bytes) {
                     write_bt_pcm = true;
                 } else {
-                    // Do not splice short PCM tails with dither; rebuffer to absorb A2DP jitter.
-                    draining_bt_pcm = false;
+                    // Keep draining mode once playback is established; a short underrun should
+                    // produce at most one dither block, not a full prebuffer-sized gap.
                     rebuffered = true;
                 }
             }
