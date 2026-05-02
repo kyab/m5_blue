@@ -719,6 +719,17 @@ void setup() {
     // Process audio in-place; ESP32-A2DP writes the modified buffer to I2S.
     a2dp_sink.set_raw_stream_reader_writer(audio_callback);
 
+    // Host auto-connect (Mac/PC reconnect when this device powers on):
+    // A2DP/AVDTP do not define "who must initiate" the ACL; the stack may page
+    // a bonded peer or accept an incoming page. macOS/Windows often auto-connect
+    // to known speakers when the remote is connectable, but that behavior is OS-
+    // dependent. ESP32-A2DP enables outbound paging to the last paired source
+    // (NVS `connected_bda` / `last_bda`) on stack-up plus retries after drop,
+    // which matches typical headphone/speaker behavior after initial pairing.
+    a2dp_sink.set_auto_reconnect(true);
+    // Default reconnect_delay is 1000 ms; shorten slightly so paging starts sooner after boot.
+    a2dp_sink.set_reconnect_delay(500);
+
     // Start A2DP sink
     ESP_LOGI("main", "Starting Bluetooth A2DP Sink...");
     M5.Display.setTextColor(CYAN);
