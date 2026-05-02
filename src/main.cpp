@@ -58,7 +58,7 @@ I2SStream i2s;
 
 static const uint32_t kI2SWriterFrames = 256;       // ~5.8 ms at 44.1 kHz; caps resume latency
 static const size_t kBtPcmRingBytes = 32768;        // ~186 ms stereo 16-bit queue; absorbs A2DP burst jitter
-static const size_t kBtPcmPrebufferBytes = 8192;    // ~46 ms: absorb A2DP jitter before first PCM drain
+static const size_t kBtPcmPrebufferBytes = 24576;   // ~139 ms: resume into the stable high-water region
 static const uint32_t kBtPcmPushWaitMs = 20;        // Restore bounded back-pressure before dropping PCM
 static uint8_t s_bt_pcm_ring[kBtPcmRingBytes];
 static size_t s_bt_pcm_head = 0;
@@ -96,6 +96,7 @@ struct AudioStats {
 
 static AudioStats s_audio_stats;
 static portMUX_TYPE s_audio_stats_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t s_last_callback_us = 0;
 
 static inline void stats_minmax_u32(volatile uint32_t& min_v, volatile uint32_t& max_v, uint32_t value) {
     if (value < min_v) min_v = value;
@@ -103,7 +104,6 @@ static inline void stats_minmax_u32(volatile uint32_t& min_v, volatile uint32_t&
 }
 
 static void stats_note_callback(uint32_t sample_num) {
-    static uint32_t s_last_callback_us = 0;
     uint32_t now_us = (uint32_t)micros();
     portENTER_CRITICAL(&s_audio_stats_mux);
     s_audio_stats.callback_count++;
@@ -112,6 +112,12 @@ static void stats_note_callback(uint32_t sample_num) {
         stats_minmax_u32(s_audio_stats.callback_gap_us_min, s_audio_stats.callback_gap_us_max, now_us - s_last_callback_us);
     }
     s_last_callback_us = now_us;
+    portEXIT_CRITICAL(&s_audio_stats_mux);
+}
+
+static void stats_reset_callback_gap() {
+    portENTER_CRITICAL(&s_audio_stats_mux);
+    s_last_callback_us = 0;
     portEXIT_CRITICAL(&s_audio_stats_mux);
 }
 
@@ -515,6 +521,7 @@ void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
 void audio_state_callback_debug(esp_a2d_audio_state_t state, void* obj) {
     (void)obj;
     g_a2dp_audio_state = state;
+    stats_reset_callback_gap();
     if (state != ESP_A2D_AUDIO_STATE_STARTED) {
         bt_pcm_ring_clear();
     }
