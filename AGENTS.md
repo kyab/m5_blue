@@ -34,6 +34,15 @@ Triggers that should cause the agent to consult Going-Zero on GitHub:
 
 - Use PlatformIO (`pio`) for building, uploading, and monitoring. See `.agents/skills/pio-workflow/SKILL.md`.
 
+## Cursor Cloud Agent (environment setup)
+
+This repo uses **git submodules** (`ESP32-A2DP`, `Module-Audio`). Cloud Agent VMs need them checked out before `pio run` can succeed (e.g. missing `audio_i2c.hpp` from Module-Audio).
+
+- **Primary**: `.cursor/environment.json` runs `git submodule update --init --recursive` in the `install` step alongside PlatformIO setup. See [Cursor Cloud Agent setup](https://cursor.com/docs/cloud-agent/setup) for how `install` / Dockerfile-based environments work.
+- **Fallback**: If submodules are still missing (e.g. shallow clone or interrupted install), run `git submodule update --init --recursive` from the repository root before building.
+
+There is no separate product named "Cursor web env setup agent" in the docs; environment provisioning is described as **onboarding at [cursor.com/onboard](https://cursor.com/onboard)** (optional snapshot) **or** **repository-defined setup** via `.cursor/environment.json` (and optionally a Dockerfile). Prefer keeping submodule + toolchain steps in `environment.json` / `AGENTS.md` rather than ad-hoc chat instructions.
+
 ## Default PlatformIO Source Target
 
 - Unless the user explicitly specifies another environment or file, treat the source scope as the default PlatformIO environment in `platformio.ini` (`[platformio] default_envs`).
