@@ -1,4 +1,4 @@
-// Phase 3: Bluetooth A2DP + Module Audio + in-place audio processing
+// Phase 3: Bluetooth A2DP + Module Audio + queued I2S processing
 
 #include <M5Unified.h>
 #include "audio_i2c.hpp"
@@ -312,16 +312,16 @@ BluetoothA2DPSinkKeepI2S a2dp_sink(a2dp_output);
 // Ring buffer for delay effect
 RingBufferInterleaved* g_ring = nullptr;
 
-// Effect flags
-bool g_effect_blue = false; // Volume reduction
-bool g_effect_red = false;  // Delay effect
+// Effect control targets written by loop() and consumed by the I2S writer task.
+volatile bool g_effect_blue = false; // Volume reduction
+volatile bool g_effect_red = false;  // Delay effect
 
 // DJ Filter (Going-Zero port): knob-driven LPF/HPF crossover
 static DJFilter g_dj_filter;
-// Scratch buffers for int16<->float deinterleave in audio_callback (non-reentrant: BT callback is single-threaded)
-static const uint32_t kMaxCallbackSamples = 1024;
-static float s_dj_left[kMaxCallbackSamples];
-static float s_dj_right[kMaxCallbackSamples];
+static volatile float g_dj_filter_target_value = 0.0f;
+// Scratch buffers for int16<->float deinterleave in the I2S writer task.
+static float s_dj_left[kI2SWriterFrames];
+static float s_dj_right[kI2SWriterFrames];
 
 // When the A2DP source sends long runs of digital silence (pause, track gap, app mute),
 // some DAC paths treat "all zero" PCM as an idle state and create audible clicks at
@@ -397,6 +397,77 @@ static void add_silence_dither_if_needed(int16_t* data, uint32_t sample_num) {
     }
 }
 
+static void apply_effects_before_i2s(int16_t* data, uint32_t sample_num, bool from_bt_pcm) {
+    static bool s_delay_effect_active = false;
+    static float s_applied_dj_filter_value = 0.0f;
+
+    bool blue_enabled = g_effect_blue;
+    bool red_enabled = g_effect_red;
+
+    if (from_bt_pcm) {
+        if (g_ring != nullptr && red_enabled && !s_delay_effect_active) {
+            g_ring->syncPositon();
+            g_ring->advanceReadPosition(-44100); // ~1 second delay
+        }
+        s_delay_effect_active = red_enabled;
+
+        // Apply volume effect
+        if (blue_enabled) {
+            for (uint32_t i = 0; i < sample_num; i++) {
+                int16_t* left = &data[i * 2];
+                int16_t* right = &data[i * 2 + 1];
+                float leftf = *left;
+                float rightf = *right;
+                leftf *= 0.3f;
+                rightf *= 0.3f;
+                *left = static_cast<int16_t>(leftf);
+                *right = static_cast<int16_t>(rightf);
+            }
+        }
+
+        // Apply delay effect using ring buffer
+        if (g_ring != nullptr) {
+            if (red_enabled) {
+                g_ring->storeSamples(data, sample_num);
+                g_ring->readSamplesTo(data, sample_num);
+            } else {
+                g_ring->storeSamples(data, sample_num);
+            }
+        }
+
+        float target_v = g_dj_filter_target_value;
+        if (target_v != s_applied_dj_filter_value) {
+            g_dj_filter.setFilterValue(target_v);
+            s_applied_dj_filter_value = target_v;
+        }
+
+        // DJ Filter (Going-Zero): deinterleave int16 -> float, process, reinterleave back with clamp.
+        uint32_t n = (sample_num > kI2SWriterFrames) ? kI2SWriterFrames : sample_num;
+        for (uint32_t i = 0; i < n; i++) {
+            s_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
+            s_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
+        }
+        g_dj_filter.process(s_dj_left, s_dj_right, n);
+        for (uint32_t i = 0; i < n; i++) {
+            float l = s_dj_left[i] * 32768.0f;
+            float r = s_dj_right[i] * 32768.0f;
+            if (l > 32767.0f) l = 32767.0f;
+            else if (l < -32768.0f) l = -32768.0f;
+            if (r > 32767.0f) r = 32767.0f;
+            else if (r < -32768.0f) r = -32768.0f;
+            data[i * 2] = static_cast<int16_t>(l);
+            data[i * 2 + 1] = static_cast<int16_t>(r);
+        }
+    }
+
+    if (from_bt_pcm) {
+        // Idle-zero prevention: add uncorrelated TPDF dither only for (near-)silent blocks.
+        add_silence_dither_if_needed(data, sample_num);
+    } else if (!red_enabled) {
+        s_delay_effect_active = false;
+    }
+}
+
 static void i2s_writer_task(void* arg) {
     (void)arg;
     const size_t block_bytes = sizeof(s_i2s_writer_bytes);
@@ -429,12 +500,14 @@ static void i2s_writer_task(void* arg) {
             size_t got = bt_pcm_ring_pop(s_i2s_writer_bytes, block_bytes);
             if (got != block_bytes) {
                 draining_bt_pcm = false;
+                write_bt_pcm = false;
                 rebuffered = true;
                 fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
             }
         } else {
             fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
         }
+        apply_effects_before_i2s(reinterpret_cast<int16_t*>(s_i2s_writer_bytes), kI2SWriterFrames, write_bt_pcm);
         uint32_t write_start_us = (uint32_t)micros();
         size_t written = i2s.write(s_i2s_writer_bytes, block_bytes);
         uint32_t write_us = (uint32_t)micros() - write_start_us;
@@ -442,8 +515,9 @@ static void i2s_writer_task(void* arg) {
     }
 }
 
-// Audio callback - process in-place; ESP32-A2DP writes the modified buffer to I2S.
+// Audio callback - keep Bluetooth ingress lightweight; effects run immediately before I2S writes.
 void audio_callback(int16_t* data, uint32_t sample_num) {
+    (void)data;
     stats_note_callback(sample_num);
 
     static bool first_call = true;
@@ -451,54 +525,6 @@ void audio_callback(int16_t* data, uint32_t sample_num) {
         ESP_LOGI("audio", "*** audio_callback FIRST CALL *** samples=%lu", sample_num);
         first_call = false;
     }
-
-    // Apply volume effect
-    if (g_effect_blue) {
-        for (uint32_t i = 0; i < sample_num; i++) {
-            int16_t* left = &data[i * 2];
-            int16_t* right = &data[i * 2 + 1];
-            float leftf = *left;
-            float rightf = *right;
-            leftf *= 0.3f;
-            rightf *= 0.3f;
-            *left = static_cast<int16_t>(leftf);
-            *right = static_cast<int16_t>(rightf);
-        }
-    }
-
-    // Apply delay effect using ring buffer
-    if (g_ring != nullptr) {
-        if (g_effect_red) {
-            g_ring->storeSamples(data, sample_num);
-            g_ring->readSamplesTo(data, sample_num);
-        } else {
-            g_ring->storeSamples(data, sample_num);
-        }
-    }
-
-    // DJ Filter (Going-Zero): deinterleave int16 -> float, process, reinterleave back with clamp.
-    // Cap at kMaxCallbackSamples; leftover tail (if any) bypasses DJ filter.
-    {
-        uint32_t n = (sample_num > kMaxCallbackSamples) ? kMaxCallbackSamples : sample_num;
-        for (uint32_t i = 0; i < n; i++) {
-            s_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
-            s_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
-        }
-        g_dj_filter.process(s_dj_left, s_dj_right, n);
-        for (uint32_t i = 0; i < n; i++) {
-            float l = s_dj_left[i] * 32768.0f;
-            float r = s_dj_right[i] * 32768.0f;
-            if (l > 32767.0f) l = 32767.0f;
-            else if (l < -32768.0f) l = -32768.0f;
-            if (r > 32767.0f) r = 32767.0f;
-            else if (r < -32768.0f) r = -32768.0f;
-            data[i * 2] = static_cast<int16_t>(l);
-            data[i * 2 + 1] = static_cast<int16_t>(r);
-        }
-    }
-
-    // Idle-zero prevention: add uncorrelated TPDF dither only for (near-)silent blocks.
-    add_silence_dither_if_needed(data, sample_num);
 
     static uint32_t processed_samples = 0;
     processed_samples += sample_num;
@@ -552,7 +578,7 @@ void setup() {
     M5.Display.setTextSize(2);
     M5.Display.setTextColor(WHITE);
     M5.Display.println("\nM5Blue - Phase 3");
-    M5.Display.println("A2DP in-place processing");
+    M5.Display.println("A2DP queued I2S processing");
     M5.Display.println("");
 
     // Initialize dual button pins
@@ -716,7 +742,7 @@ void setup() {
     a2dp_sink.set_on_connection_state_changed(connection_state_callback);
     a2dp_sink.set_on_audio_state_changed(audio_state_callback_debug, nullptr);
 
-    // Process audio in-place; ESP32-A2DP writes the modified buffer to I2S.
+    // Keep Bluetooth ingress lightweight; effects are applied in the I2S writer task.
     a2dp_sink.set_raw_stream_reader_writer(audio_callback);
 
     // Host auto-connect (Mac/PC reconnect when this device powers on):
@@ -771,10 +797,6 @@ void loop() {
     if (red_pressed && !g_effect_red) {
         ESP_LOGI("main", "Effect Red ON (Delay)");
         g_effect_red = true;
-        if (g_ring) {
-            g_ring->syncPositon();
-            g_ring->advanceReadPosition(-44100); // ~1 second delay
-        }
         device.setRGBLED(2, 0xFF0000); // Red LED
     } else if (!red_pressed && g_effect_red) {
         ESP_LOGI("main", "Effect Red OFF");
@@ -843,7 +865,7 @@ void loop() {
         if (v < -1.0f) v = -1.0f;
         // Small deadzone so a physical knob near the center reliably hits exact bypass (reset+fade-in path)
         if (fabsf(v) < 0.03f) v = 0.0f;
-        g_dj_filter.setFilterValue(v);
+        g_dj_filter_target_value = v;
 
         static uint32_t last_rotation_dump_ms = 0;
         uint32_t now_ms = (uint32_t)millis();
