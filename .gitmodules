@@ -1,7 +1,7 @@
 [submodule "ESP32-A2DP"]
 	path = ESP32-A2DP
 	url = https://github.com/kyab/ESP32-A2DP.git
-	branch = main
+	branch = custom
 [submodule "Module-Audio"]
 	path = Module-Audio
 	url = https://github.com/kyab/M5Module-Audio.git
