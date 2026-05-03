@@ -1,4 +1,4 @@
-// Phase 3: Bluetooth A2DP + Module Audio + in-place audio processing
+// Phase 3: Bluetooth A2DP + Module Audio + queued I2S processing
 
 #include <M5Unified.h>
 #include "audio_i2c.hpp"
@@ -52,11 +52,13 @@ AudioI2c device;
 ES8388 es8388(&Wire, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN);
 
 static const uint32_t kSampleRate = 44100;
+static const uint32_t kStereoChannels = 2;
 
 // I2SStream for audio output (fed by a single writer task)
 I2SStream i2s;
 
 static const uint32_t kI2SWriterFrames = 256;       // ~5.8 ms at 44.1 kHz; caps resume latency
+static const size_t kI2SWriterBytes = kI2SWriterFrames * kStereoChannels * sizeof(int16_t);
 static const size_t kBtPcmRingBytes = 32768;        // ~186 ms stereo 16-bit queue; absorbs A2DP burst jitter
 static const size_t kBtPcmPrebufferBytes = 24576;   // ~139 ms: resume into the stable high-water region
 static const uint32_t kBtPcmPushWaitMs = 20;        // Restore bounded back-pressure before dropping PCM
@@ -65,8 +67,9 @@ static size_t s_bt_pcm_head = 0;
 static size_t s_bt_pcm_tail = 0;
 static size_t s_bt_pcm_used = 0;
 static portMUX_TYPE s_bt_pcm_mux = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t s_i2s_writer_bytes[kI2SWriterFrames * 2 * sizeof(int16_t)];
+static uint8_t s_i2s_writer_bytes[kI2SWriterBytes];
 static TaskHandle_t s_i2s_writer_task = nullptr;
+static_assert(sizeof(s_i2s_writer_bytes) == kI2SWriterBytes, "I2S writer buffer size mismatch");
 
 extern volatile esp_a2d_audio_state_t g_a2dp_audio_state;
 static size_t bt_pcm_ring_used();
@@ -151,6 +154,87 @@ static void stats_note_rebuffer() {
     portENTER_CRITICAL(&s_audio_stats_mux);
     s_audio_stats.writer_rebuffer_count++;
     portEXIT_CRITICAL(&s_audio_stats_mux);
+}
+
+struct ControlLoopStats {
+    uint32_t loop_count = 0;
+    uint32_t loop_gap_us_min = UINT32_MAX;
+    uint32_t loop_gap_us_max = 0;
+    uint32_t loop_gap_us_sum = 0;
+    uint32_t loop_body_us_min = UINT32_MAX;
+    uint32_t loop_body_us_max = 0;
+    uint32_t loop_body_us_sum = 0;
+    uint32_t m5_update_us_min = UINT32_MAX;
+    uint32_t m5_update_us_max = 0;
+    uint32_t m5_update_us_sum = 0;
+    uint32_t button_us_min = UINT32_MAX;
+    uint32_t button_us_max = 0;
+    uint32_t button_us_sum = 0;
+    uint32_t adc_us_min = UINT32_MAX;
+    uint32_t adc_us_max = 0;
+    uint32_t adc_us_sum = 0;
+    uint32_t display_us_min = UINT32_MAX;
+    uint32_t display_us_max = 0;
+    uint32_t display_us_sum = 0;
+    uint32_t display_update_count = 0;
+    uint32_t audio_stats_us_min = UINT32_MAX;
+    uint32_t audio_stats_us_max = 0;
+    uint32_t audio_stats_us_sum = 0;
+};
+
+static ControlLoopStats s_control_stats;
+static uint32_t s_last_loop_start_us = 0;
+
+static inline void control_stats_note_us(uint32_t& min_v, uint32_t& max_v, uint32_t& sum_v, uint32_t value) {
+    if (value < min_v) min_v = value;
+    if (value > max_v) max_v = value;
+    sum_v += value;
+}
+
+static void dump_control_stats_if_due() {
+    static uint32_t s_last_dump_ms = 0;
+    uint32_t now_ms = (uint32_t)millis();
+    if (now_ms - s_last_dump_ms < 1000) return;
+    s_last_dump_ms = now_ms;
+
+    ControlLoopStats stats = s_control_stats;
+    s_control_stats = ControlLoopStats();
+    if (stats.loop_count == 0) return;
+
+    uint32_t loop_gap_min = (stats.loop_gap_us_min == UINT32_MAX) ? 0 : stats.loop_gap_us_min;
+    uint32_t loop_body_min = (stats.loop_body_us_min == UINT32_MAX) ? 0 : stats.loop_body_us_min;
+    uint32_t m5_update_min = (stats.m5_update_us_min == UINT32_MAX) ? 0 : stats.m5_update_us_min;
+    uint32_t button_min = (stats.button_us_min == UINT32_MAX) ? 0 : stats.button_us_min;
+    uint32_t adc_min = (stats.adc_us_min == UINT32_MAX) ? 0 : stats.adc_us_min;
+    uint32_t display_min = (stats.display_us_min == UINT32_MAX) ? 0 : stats.display_us_min;
+    uint32_t audio_stats_min = (stats.audio_stats_us_min == UINT32_MAX) ? 0 : stats.audio_stats_us_min;
+    uint32_t display_avg = (stats.display_update_count == 0) ? 0 : stats.display_us_sum / stats.display_update_count;
+
+    ESP_LOGI("control_stats",
+             "loops=%lu gap_us=%lu/%lu/%lu body_us=%lu/%lu/%lu m5_us=%lu/%lu/%lu button_us=%lu/%lu/%lu adc_us=%lu/%lu/%lu display_us=%lu/%lu/%lu display_n=%lu audio_stats_us=%lu/%lu/%lu",
+             (unsigned long)stats.loop_count,
+             (unsigned long)loop_gap_min,
+             (unsigned long)(stats.loop_gap_us_sum / stats.loop_count),
+             (unsigned long)stats.loop_gap_us_max,
+             (unsigned long)loop_body_min,
+             (unsigned long)(stats.loop_body_us_sum / stats.loop_count),
+             (unsigned long)stats.loop_body_us_max,
+             (unsigned long)m5_update_min,
+             (unsigned long)(stats.m5_update_us_sum / stats.loop_count),
+             (unsigned long)stats.m5_update_us_max,
+             (unsigned long)button_min,
+             (unsigned long)(stats.button_us_sum / stats.loop_count),
+             (unsigned long)stats.button_us_max,
+             (unsigned long)adc_min,
+             (unsigned long)(stats.adc_us_sum / stats.loop_count),
+             (unsigned long)stats.adc_us_max,
+             (unsigned long)display_min,
+             (unsigned long)display_avg,
+             (unsigned long)stats.display_us_max,
+             (unsigned long)stats.display_update_count,
+             (unsigned long)audio_stats_min,
+             (unsigned long)(stats.audio_stats_us_sum / stats.loop_count),
+             (unsigned long)stats.audio_stats_us_max);
 }
 
 static void dump_audio_stats_if_due() {
@@ -312,16 +396,16 @@ BluetoothA2DPSinkKeepI2S a2dp_sink(a2dp_output);
 // Ring buffer for delay effect
 RingBufferInterleaved* g_ring = nullptr;
 
-// Effect flags
-bool g_effect_blue = false; // Volume reduction
-bool g_effect_red = false;  // Delay effect
+// Effect control targets written by loop() and consumed by the I2S writer task.
+volatile bool g_effect_blue = false; // Volume reduction
+volatile bool g_effect_red = false;  // Delay effect
 
 // DJ Filter (Going-Zero port): knob-driven LPF/HPF crossover
 static DJFilter g_dj_filter;
-// Scratch buffers for int16<->float deinterleave in audio_callback (non-reentrant: BT callback is single-threaded)
-static const uint32_t kMaxCallbackSamples = 1024;
-static float s_dj_left[kMaxCallbackSamples];
-static float s_dj_right[kMaxCallbackSamples];
+static volatile float g_dj_filter_target_value = 0.0f;
+// Scratch buffers for int16<->float deinterleave in the I2S writer task.
+static float s_dj_left[kI2SWriterFrames];
+static float s_dj_right[kI2SWriterFrames];
 
 // When the A2DP source sends long runs of digital silence (pause, track gap, app mute),
 // some DAC paths treat "all zero" PCM as an idle state and create audible clicks at
@@ -375,9 +459,9 @@ static void fill_dither_bytes(uint8_t* data, size_t bytes) {
     }
 }
 
-static void add_silence_dither_if_needed(int16_t* data, uint32_t sample_num) {
+static void add_silence_dither_if_needed(int16_t* data, uint32_t frame_count) {
     int32_t peak = 0;
-    const uint32_t total = sample_num * 2u;
+    const uint32_t total = frame_count * kStereoChannels;
     for (uint32_t i = 0; i < total; i++) {
         int32_t s = data[i];
         if (s < 0) s = -s;
@@ -385,7 +469,7 @@ static void add_silence_dither_if_needed(int16_t* data, uint32_t sample_num) {
     }
     if (peak > kSilenceDitherPeakThreshold) return;
 
-    for (uint32_t i = 0; i < sample_num; i++) {
+    for (uint32_t i = 0; i < frame_count; i++) {
         int32_t nl = (int32_t)data[i * 2] + make_tpdf_dither_sample();
         int32_t nr = (int32_t)data[i * 2 + 1] + make_tpdf_dither_sample();
         if (nl > 32767) nl = 32767;
@@ -397,11 +481,83 @@ static void add_silence_dither_if_needed(int16_t* data, uint32_t sample_num) {
     }
 }
 
+static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool from_bt_pcm) {
+    static bool s_delay_effect_active = false;
+    static float s_applied_dj_filter_value = 0.0f;
+
+    bool blue_enabled = g_effect_blue;
+    bool red_enabled = g_effect_red;
+
+    if (from_bt_pcm) {
+        if (g_ring != nullptr && red_enabled && !s_delay_effect_active) {
+            g_ring->syncPositon();
+            g_ring->advanceReadPosition(-44100); // ~1 second delay
+        }
+        s_delay_effect_active = red_enabled;
+
+        // Apply volume effect
+        if (blue_enabled) {
+            for (uint32_t i = 0; i < frame_count; i++) {
+                int16_t* left = &data[i * 2];
+                int16_t* right = &data[i * 2 + 1];
+                float leftf = *left;
+                float rightf = *right;
+                leftf *= 0.3f;
+                rightf *= 0.3f;
+                *left = static_cast<int16_t>(leftf);
+                *right = static_cast<int16_t>(rightf);
+            }
+        }
+
+        // Apply delay effect using ring buffer
+        if (g_ring != nullptr) {
+            if (red_enabled) {
+                g_ring->storeSamples(data, frame_count);
+                g_ring->readSamplesTo(data, frame_count);
+            } else {
+                g_ring->storeSamples(data, frame_count);
+            }
+        }
+
+        float target_v = g_dj_filter_target_value;
+        if (target_v != s_applied_dj_filter_value) {
+            g_dj_filter.setFilterValue(target_v);
+            s_applied_dj_filter_value = target_v;
+        }
+
+        // DJ Filter (Going-Zero): deinterleave int16 -> float, process, reinterleave back with clamp.
+        uint32_t n = (frame_count > kI2SWriterFrames) ? kI2SWriterFrames : frame_count;
+        for (uint32_t i = 0; i < n; i++) {
+            s_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
+            s_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
+        }
+        g_dj_filter.process(s_dj_left, s_dj_right, n);
+        for (uint32_t i = 0; i < n; i++) {
+            float l = s_dj_left[i] * 32768.0f;
+            float r = s_dj_right[i] * 32768.0f;
+            if (l > 32767.0f) l = 32767.0f;
+            else if (l < -32768.0f) l = -32768.0f;
+            if (r > 32767.0f) r = 32767.0f;
+            else if (r < -32768.0f) r = -32768.0f;
+            data[i * 2] = static_cast<int16_t>(l);
+            data[i * 2 + 1] = static_cast<int16_t>(r);
+        }
+    }
+
+    if (from_bt_pcm) {
+        // Idle-zero prevention: add uncorrelated TPDF dither only for (near-)silent blocks.
+        add_silence_dither_if_needed(data, frame_count);
+    } else if (!red_enabled) {
+        s_delay_effect_active = false;
+    }
+}
+
 static void i2s_writer_task(void* arg) {
     (void)arg;
     const size_t block_bytes = sizeof(s_i2s_writer_bytes);
+    const uint32_t block_frames = block_bytes / (kStereoChannels * sizeof(int16_t));
     bool draining_bt_pcm = false;
-    ESP_LOGI("i2s_writer", "task started: block=%u bytes", (unsigned)block_bytes);
+    ESP_LOGI("i2s_writer", "task started: block=%u bytes frames=%lu", (unsigned)block_bytes, (unsigned long)block_frames);
     for (;;) {
         bool write_bt_pcm = false;
         bool rebuffered = false;
@@ -429,12 +585,14 @@ static void i2s_writer_task(void* arg) {
             size_t got = bt_pcm_ring_pop(s_i2s_writer_bytes, block_bytes);
             if (got != block_bytes) {
                 draining_bt_pcm = false;
+                write_bt_pcm = false;
                 rebuffered = true;
                 fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
             }
         } else {
             fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
         }
+        apply_effects_before_i2s(reinterpret_cast<int16_t*>(s_i2s_writer_bytes), block_frames, write_bt_pcm);
         uint32_t write_start_us = (uint32_t)micros();
         size_t written = i2s.write(s_i2s_writer_bytes, block_bytes);
         uint32_t write_us = (uint32_t)micros() - write_start_us;
@@ -442,8 +600,9 @@ static void i2s_writer_task(void* arg) {
     }
 }
 
-// Audio callback - process in-place; ESP32-A2DP writes the modified buffer to I2S.
+// Audio callback - keep Bluetooth ingress lightweight; effects run immediately before I2S writes.
 void audio_callback(int16_t* data, uint32_t sample_num) {
+    (void)data;
     stats_note_callback(sample_num);
 
     static bool first_call = true;
@@ -451,54 +610,6 @@ void audio_callback(int16_t* data, uint32_t sample_num) {
         ESP_LOGI("audio", "*** audio_callback FIRST CALL *** samples=%lu", sample_num);
         first_call = false;
     }
-
-    // Apply volume effect
-    if (g_effect_blue) {
-        for (uint32_t i = 0; i < sample_num; i++) {
-            int16_t* left = &data[i * 2];
-            int16_t* right = &data[i * 2 + 1];
-            float leftf = *left;
-            float rightf = *right;
-            leftf *= 0.3f;
-            rightf *= 0.3f;
-            *left = static_cast<int16_t>(leftf);
-            *right = static_cast<int16_t>(rightf);
-        }
-    }
-
-    // Apply delay effect using ring buffer
-    if (g_ring != nullptr) {
-        if (g_effect_red) {
-            g_ring->storeSamples(data, sample_num);
-            g_ring->readSamplesTo(data, sample_num);
-        } else {
-            g_ring->storeSamples(data, sample_num);
-        }
-    }
-
-    // DJ Filter (Going-Zero): deinterleave int16 -> float, process, reinterleave back with clamp.
-    // Cap at kMaxCallbackSamples; leftover tail (if any) bypasses DJ filter.
-    {
-        uint32_t n = (sample_num > kMaxCallbackSamples) ? kMaxCallbackSamples : sample_num;
-        for (uint32_t i = 0; i < n; i++) {
-            s_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
-            s_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
-        }
-        g_dj_filter.process(s_dj_left, s_dj_right, n);
-        for (uint32_t i = 0; i < n; i++) {
-            float l = s_dj_left[i] * 32768.0f;
-            float r = s_dj_right[i] * 32768.0f;
-            if (l > 32767.0f) l = 32767.0f;
-            else if (l < -32768.0f) l = -32768.0f;
-            if (r > 32767.0f) r = 32767.0f;
-            else if (r < -32768.0f) r = -32768.0f;
-            data[i * 2] = static_cast<int16_t>(l);
-            data[i * 2 + 1] = static_cast<int16_t>(r);
-        }
-    }
-
-    // Idle-zero prevention: add uncorrelated TPDF dither only for (near-)silent blocks.
-    add_silence_dither_if_needed(data, sample_num);
 
     static uint32_t processed_samples = 0;
     processed_samples += sample_num;
@@ -552,7 +663,7 @@ void setup() {
     M5.Display.setTextSize(2);
     M5.Display.setTextColor(WHITE);
     M5.Display.println("\nM5Blue - Phase 3");
-    M5.Display.println("A2DP in-place processing");
+    M5.Display.println("A2DP queued I2S processing");
     M5.Display.println("");
 
     // Initialize dual button pins
@@ -716,7 +827,7 @@ void setup() {
     a2dp_sink.set_on_connection_state_changed(connection_state_callback);
     a2dp_sink.set_on_audio_state_changed(audio_state_callback_debug, nullptr);
 
-    // Process audio in-place; ESP32-A2DP writes the modified buffer to I2S.
+    // Keep Bluetooth ingress lightweight; effects are applied in the I2S writer task.
     a2dp_sink.set_raw_stream_reader_writer(audio_callback);
 
     // Host auto-connect (Mac/PC reconnect when this device powers on):
@@ -749,9 +860,18 @@ void setup() {
 }
 
 void loop() {
+    uint32_t loop_start_us = (uint32_t)micros();
+    if (s_last_loop_start_us != 0) {
+        control_stats_note_us(s_control_stats.loop_gap_us_min, s_control_stats.loop_gap_us_max, s_control_stats.loop_gap_us_sum, loop_start_us - s_last_loop_start_us);
+    }
+    s_last_loop_start_us = loop_start_us;
+
+    uint32_t section_start_us = (uint32_t)micros();
     M5.update();
+    control_stats_note_us(s_control_stats.m5_update_us_min, s_control_stats.m5_update_us_max, s_control_stats.m5_update_us_sum, (uint32_t)micros() - section_start_us);
     update_bt_status_display();
 
+    section_start_us = (uint32_t)micros();
     // Read dual button states
     bool blue_pressed = (digitalRead(DUAL_BUTTON_BLUE) == LOW);
     bool red_pressed = (digitalRead(DUAL_BUTTON_RED) == LOW);
@@ -771,18 +891,15 @@ void loop() {
     if (red_pressed && !g_effect_red) {
         ESP_LOGI("main", "Effect Red ON (Delay)");
         g_effect_red = true;
-        if (g_ring) {
-            g_ring->syncPositon();
-            g_ring->advanceReadPosition(-44100); // ~1 second delay
-        }
         device.setRGBLED(2, 0xFF0000); // Red LED
     } else if (!red_pressed && g_effect_red) {
         ESP_LOGI("main", "Effect Red OFF");
         g_effect_red = false;
         device.setRGBLED(2, 0x00FF00); // Green LED
     }
+    control_stats_note_us(s_control_stats.button_us_min, s_control_stats.button_us_max, s_control_stats.button_us_sum, (uint32_t)micros() - section_start_us);
 
-    // Rotation angle unit (Grove B): drive DJ filter every loop (~100 Hz), log/display at 5 Hz.
+    // Rotation angle unit (Grove B): drive DJ filter every loop, log/display at 5 Hz.
     // ESP32 ADC on GPIO36 is inherently noisy; apply (A) 16x oversampling + (B) EMA low-pass
     // before mapping to v. Knob asymmetric around center, so use piecewise linear mapping.
     // Going-Zero GUI horizontal slider equivalence:
@@ -794,43 +911,34 @@ void loop() {
         const int ROT_MV_CENTER = 2100;
         const int ROT_MV_RIGHT = 142;
 
-        // (A) Oversampling: read N times in a burst and average (~1ms total on GPIO36)
-        const int kOversampleN = 16;
+        // (A) Oversampling: read N times in a burst and average.
+        const int kOversampleN = 8;
         int mV_sum = 0;
-        int raw_sum = 0;
+        section_start_us = (uint32_t)micros();
         for (int i = 0; i < kOversampleN; i++) {
             mV_sum += analogReadMilliVolts(ROTATION_ANGLE_GPIO);
-            raw_sum += analogRead(ROTATION_ANGLE_GPIO);
         }
+        control_stats_note_us(s_control_stats.adc_us_min, s_control_stats.adc_us_max, s_control_stats.adc_us_sum, (uint32_t)micros() - section_start_us);
         int mV_avg = mV_sum / kOversampleN;
-        int raw_avg = raw_sum / kOversampleN;
 
         // (B) EMA low-pass filter: mV_filt = alpha * mV_avg + (1 - alpha) * mV_filt
-        // alpha=0.2 at ~100Hz loop => time constant ~50ms (enough smoothing, still responsive)
+        // Higher alpha keeps ADC noise smoothing but reduces knob-to-filter lag.
         static float s_mV_filt = 0.0f;
-        static float s_raw_filt = 0.0f;
         static bool s_ema_init = false;
-        const float kEmaAlpha = 0.2f;
+        const float kEmaAlpha = 0.65f;
         if (!s_ema_init) {
             s_mV_filt = (float)mV_avg;
-            s_raw_filt = (float)raw_avg;
             s_ema_init = true;
         } else {
             s_mV_filt = kEmaAlpha * (float)mV_avg + (1.0f - kEmaAlpha) * s_mV_filt;
-            s_raw_filt = kEmaAlpha * (float)raw_avg + (1.0f - kEmaAlpha) * s_raw_filt;
         }
         int mV = (int)s_mV_filt;
-        int raw = (int)s_raw_filt;
 
         // Track observed min/max of the smoothed readings (calibration aid, serial log)
         static int s_mV_min = 99999;
         static int s_mV_max = -1;
-        static int s_raw_min = 99999;
-        static int s_raw_max = -1;
         if (mV < s_mV_min) s_mV_min = mV;
         if (mV > s_mV_max) s_mV_max = mV;
-        if (raw < s_raw_min) s_raw_min = raw;
-        if (raw > s_raw_max) s_raw_max = raw;
 
         // Piecewise linear: separate slopes for the LPF (mV >= center) and HPF (mV < center) halves.
         float v;
@@ -843,27 +951,30 @@ void loop() {
         if (v < -1.0f) v = -1.0f;
         // Small deadzone so a physical knob near the center reliably hits exact bypass (reset+fade-in path)
         if (fabsf(v) < 0.03f) v = 0.0f;
-        g_dj_filter.setFilterValue(v);
+        g_dj_filter_target_value = v;
 
         static uint32_t last_rotation_dump_ms = 0;
         uint32_t now_ms = (uint32_t)millis();
         if (now_ms - last_rotation_dump_ms >= 200) {
             last_rotation_dump_ms = now_ms;
+            section_start_us = (uint32_t)micros();
             // mV + filter value line (row 200, yellow)
             M5.Display.fillRect(0, 200, 320, 20, BLACK);
             M5.Display.setCursor(0, 200);
             M5.Display.setTextColor(YELLOW);
             M5.Display.printf("mV=%4d  v=%+.2f", mV, (double)v);
-            // raw line (row 220, cyan)
-            M5.Display.fillRect(0, 220, 320, 20, BLACK);
-            M5.Display.setCursor(0, 220);
-            M5.Display.setTextColor(CYAN);
-            M5.Display.printf("raw=%4d", raw);
+            control_stats_note_us(s_control_stats.display_us_min, s_control_stats.display_us_max, s_control_stats.display_us_sum, (uint32_t)micros() - section_start_us);
+            s_control_stats.display_update_count++;
         }
     }
 
+    section_start_us = (uint32_t)micros();
     dump_audio_stats_if_due();
+    control_stats_note_us(s_control_stats.audio_stats_us_min, s_control_stats.audio_stats_us_max, s_control_stats.audio_stats_us_sum, (uint32_t)micros() - section_start_us);
+    control_stats_note_us(s_control_stats.loop_body_us_min, s_control_stats.loop_body_us_max, s_control_stats.loop_body_us_sum, (uint32_t)micros() - loop_start_us);
+    s_control_stats.loop_count++;
+    dump_control_stats_if_due();
 
-    // Small delay to prevent tight loop.
-    delay(10);
+    // Keep control latency low while still yielding to other tasks.
+    delay(2);
 }
