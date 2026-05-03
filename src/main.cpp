@@ -654,7 +654,8 @@ void setup() {
 
     // Reduce log level to avoid performance issues
     esp_log_level_set("*", ESP_LOG_INFO);
-    esp_log_level_set("BT_AV", ESP_LOG_WARN); // Suppress frequent BT logs
+    // AVRCP absolute-volume logging is demoted to ESP_LOGD in the ESP32-A2DP submodule; BT_AV WARN is an extra guard.
+    esp_log_level_set("BT_AV", ESP_LOG_WARN);
 
     ESP_LOGI("main", "=== Phase 3: BT + Module Audio (I2SStream approach) ===");
     ESP_LOGI("main", "Available Heap: %zu", esp_get_free_heap_size());
@@ -848,6 +849,8 @@ void setup() {
     startup_step("S14", "before_a2dp.start");
     a2dp_sink.start("M5Blue");
     startup_step("S15", "after_a2dp.start");
+    // Reinforce after BT stack init (ESP32-A2DP fork uses ESP_LOGD for AVRCP volume paths).
+    esp_log_level_set("BT_AV", ESP_LOG_WARN);
 
     ESP_LOGI("main", "Setup complete. Waiting for Bluetooth connection...");
     M5.Display.setTextColor(WHITE);
