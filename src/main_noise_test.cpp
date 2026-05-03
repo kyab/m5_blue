@@ -305,7 +305,7 @@ void setup() {
     g_es8388.setDACOutput(DAC_OUTPUT_OUT1);
     // Moderate volume; do NOT call setDACmute() on purpose for this test.
     // Keep the DAC/HP path fully "alive" while we inject sine/zero/dither.
-    g_es8388.setDACVolume(80);
+    g_es8388.setDACVolume(100);
     g_es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
     g_es8388.setSampleRate(SAMPLE_RATE_44K);
 

@@ -720,7 +720,7 @@ void setup() {
 
     // Configure the DAC path once. Avoid runtime mute/volume switching in the audio path.
     es8388.setDACOutput(DAC_OUTPUT_OUT1);
-    es8388.setDACVolume(70);
+    es8388.setDACVolume(100);
     es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
     es8388.setSampleRate(SAMPLE_RATE_44K);
     startup_step("S06", "DAC_config");
