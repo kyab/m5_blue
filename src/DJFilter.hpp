@@ -89,7 +89,9 @@ private:
     float _rx1, _rx2, _ry1, _ry2;
 };
 
-// ~1ms linear fade-in on demand; used to suppress clicks when entering bypass.
+// ~1 ms linear fade-in on demand; used to mask filter transients on every mode-boundary
+// transition (LPF<->bypass, bypass<->HPF, and the LPF<->HPF polarity flip), and on large
+// same-mode jumps (very fast knob spins).
 class MiniFaderIn {
 public:
     static constexpr uint32_t FADE_SAMPLE_NUM = 50;
@@ -115,16 +117,45 @@ private:
 
 class DJFilter {
 public:
-    DJFilter() : _v(0.0f) {
+    DJFilter() : _v(0.0f), _resetPending(false) {
         setFilterValue(0.0f);
     }
 
     float getFilterValue() const { return _v; }
 
     // v in [-1, +1]. v == 0 -> bypass; v < 0 -> LPF mode; v > 0 -> HPF mode.
-    // Fires MiniFaderIn when transitioning from nonzero back to 0 (click guard).
+    //
+    // Pop-noise click guard on mode-boundary crossings.
+    // The 2nd-order biquad keeps x/y history that is meaningful only for the filter type that
+    // produced it. Reusing that history with a different filter type, or with a very different
+    // cutoff, can produce a large transient -> audible click. We classify the parameter into
+    // three "modes" by the sign of v (LPF / bypass / HPF) and arm a click guard whenever the
+    // mode changes:
+    //   * _resetPending: clear IIR state on the next process() call so the new coefficients see
+    //     a clean state (avoids LPF-state-with-HPF-coefs explosion in particular).
+    //   * MiniFaderIn:   ~1 ms linear input ramp 0->1 on the next process() call so the audible
+    //     transient at the start of the new filter's response is masked.
+    // Going-Zero divergence: the original DJFilter.m only triggers fadeIn on the
+    // active->bypass transition. We additionally guard bypass->active and the direct LPF<->HPF
+    // polarity flip (which can happen when a fast knob spin skips the bypass deadzone). The
+    // extra reset on polarity flip is the most important addition because biquad b-coefficient
+    // signs invert between LPF and HPF, so reusing state across that boundary is the dominant
+    // pop-noise source observed when sweeping the knob quickly.
     void setFilterValue(float v) {
-        if (_v != 0.0f && v == 0.0f) {
+        int oldSign = (_v < 0.0f) ? -1 : ((_v > 0.0f) ? 1 : 0);
+        int newSign = (v < 0.0f) ? -1 : ((v > 0.0f) ? 1 : 0);
+        if (oldSign != newSign) {
+            // Mode boundary crossing (LPF<->bypass, bypass<->HPF, LPF<->HPF on a fast sweep that
+            // skipped the deadzone). Reset IIR state so old-mode history does not feed new-mode
+            // coefficients, and ramp the input to mask the residual transient.
+            _resetPending = true;
+            _faderIn.startFadeIn();
+        } else if (fabsf(v - _v) >= kBigJumpThreshold) {
+            // Same-mode large jump (a very fast knob spin can move v by >0.1 between blocks even
+            // after the EMA pre-smoothing in loop()). The IIR state is still consistent with the
+            // current mode, so we do *not* reset it; just fade the input briefly to soften the
+            // coefficient-step transient. Going-Zero has this trigger as commented-out code in
+            // DJFilter.m; we re-enable it as defense in depth.
             _faderIn.startFadeIn();
         }
         _v = v;
@@ -142,12 +173,29 @@ public:
         }
     }
 
-    // Real-time stereo processing. Bypass + reset when v == 0 exactly.
+    // Real-time stereo processing.
+    //
+    // Going-Zero match: regardless of mode, the audio always flows through the same
+    // chain (faderIn -> HPF -> LPF). In bypass (v == 0) the cutoffs are LPF=22 kHz and
+    // HPF=1 Hz, so the chain is effectively passthrough but the MiniFaderIn ramp can still
+    // be applied at mode boundaries. The original DJFilter.m additionally calls reset()
+    // every block while v == 0; we replicate that so a long bypass period leaves a clean
+    // state when the knob next moves.
+    //
+    // Earlier versions of this port early-returned in bypass. That avoided two biquads
+    // per block (CPU win) but introduced an audible step at active->bypass: the previous
+    // block's output was the filtered signal, the next block's output was the raw input,
+    // and the 1-sample jump between them was the click the user reported. Running through
+    // the near-passthrough chain with the input ramp turns that jump into a 1 ms fade.
     void process(float* left, float* right, uint32_t n) {
+        if (_resetPending) {
+            _lpf.reset();
+            _hpf.reset();
+            _resetPending = false;
+        }
         if (_v == 0.0f) {
             _lpf.reset();
             _hpf.reset();
-            return;
         }
         _faderIn.processStereo(left, right, n);
         _hpf.processStereo(left, right, n);
@@ -161,8 +209,10 @@ public:
 
 private:
     static constexpr float _fs = 44100.0f;
+    static constexpr float kBigJumpThreshold = 0.1f; // |delta v| within the same mode that warrants a fade
     BiquadIIR _lpf;
     BiquadIIR _hpf;
     MiniFaderIn _faderIn;
     volatile float _v;
+    bool _resetPending;
 };
