@@ -49,6 +49,16 @@ There is no separate product named "Cursor web env setup agent" in the docs; env
 - In this repository, the default environment is `m5stack-core2`, so prioritize edits and verification against that environment's effective source set (`build_src_filter = +<*> -<main_noise_test.cpp>`).
 - Only switch to other environment-specific sources (for example `main_noise_test.cpp`) when the user explicitly requests that target.
 
+## Cursor Cloud specific instructions
+
+- **First build is slow (~95 s)**: PlatformIO downloads the ESP32 toolchain and compiles the entire Arduino framework on the first `pio run`. Subsequent incremental builds are fast (~5–10 s for source-only changes).
+- **No upload/monitor in Cloud VMs**: `pio run -t upload` and `pio device monitor` require a physical M5Stack Core2 over USB. In Cloud Agent VMs the "hello world" validation is a successful `pio run` (compilation produces `firmware.bin`).
+- **Static analysis**: `pio check -e m5stack-core2 --skip-packages` runs cppcheck on project source. One pre-existing "high" in a third-party library (`M5GFX`) is expected and not actionable.
+- **Build commands** (see also `.agents/skills/pio-workflow/SKILL.md` and `README.md`):
+  - Default target: `pio run` (or `pio run -e m5stack-core2`)
+  - Noise-test target: `pio run -e m5stack-core2-noise-test`
+  - Clean: `pio run -e m5stack-core2 -t clean`
+
 ## Known Hardware Notes
 
 - **Module Audio (ES8388) left-channel hiss**: the LOUT1 output on the Module
