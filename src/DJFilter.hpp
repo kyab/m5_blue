@@ -89,42 +89,9 @@ private:
     float _rx1, _rx2, _ry1, _ry2;
 };
 
-// Post-polarity-flip mute ramp: only armed on LPF<->HPF (see DJFilter). Q=5 biquads
-// have a visibly longer transient after a coef reset than a short linear mute can hide:
-// lengthening (~6 ms here) beats obvious clicks. Uses smoothstep for zero slope at the
-// mute tail so the ramp does not reopen the input into a ringing filter with another edge.
-class MiniFaderIn {
-public:
-    // ~264 samples @ 44.1 kHz (~6 ms). Only used after polarityFlip; harmless when idle.
-    static constexpr uint32_t FADE_SAMPLE_NUM = 264;
-
-    MiniFaderIn() : _count(FADE_SAMPLE_NUM) {}
-
-    void startFadeIn() { _count = 0; }
-
-    void processStereo(float* left, float* right, uint32_t n) {
-        for (uint32_t i = 0; i < n; i++) {
-            if (_count < FADE_SAMPLE_NUM) {
-                float u = ((float)(_count + 1U)) / (float)FADE_SAMPLE_NUM;
-                if (u > 1.0f) {
-                    u = 1.0f;
-                }
-                // smoothstep(u) / smoothstep(1)==1 gives u*u*(3-2*u), du/dt ~ 0 at u=1.
-                float rate = u * u * (3.0f - 2.0f * u);
-                left[i] *= rate;
-                right[i] *= rate;
-                _count++;
-            }
-        }
-    }
-
-private:
-    uint32_t _count;
-};
-
 class DJFilter {
 public:
-    DJFilter() : _vTarget(0.0f), _vSmooth(0.0f), _resetPending(false) {
+    DJFilter() : _vTarget(0.0f), _vSmooth(0.0f), _flipBridgeActive(false), _flipBridgeToPositive(false) {
         applyCoefficients(0.0f);
     }
 
@@ -132,49 +99,26 @@ public:
 
     // v in [-1, +1]. v == 0 -> bypass; v < 0 -> LPF mode; v > 0 -> HPF mode.
     //
-    // Click-guard policy (refined after listening tests):
+    // Fast LPF<->HPF flips can click because biquad coefficient families effectively
+    // switch polarity. Instead of reset+mute, we bridge through bypass internally:
     //
-    //   * Only LPF<->HPF *polarity flips* (oldSign and newSign both nonzero, opposite
-    //     signs) are click-protected with reset() + MiniFaderIn + _vSmooth snap. This
-    //     happens when a very fast knob spin crosses the bypass deadzone in a single
-    //     update. The biquad b coefficients change sign here, so reusing IIR state
-    //     would produce a large transient.
+    //   LPF target -> (ramp to 0) -> (ramp to HPF target), or vice versa.
     //
-    //   * LPF<->bypass and bypass<->HPF are *not* click-protected. Bypass is implemented
-    //     as LPF=22 kHz + HPF=1 Hz, which lives in the *same* coefficient family as the
-    //     active mode on either side. The per-block linear ramp of _vSmooth toward
-    //     _vTarget (see process()) moves fc continuously through that family, so IIR
-    //     state stays consistent and no audible discontinuity is produced. An earlier
-    //     version reset+faded these too; the snap-then-fade caused a large coefficient
-    //     step that the 1 ms fade could not fully mask under Q=5, leaving an audible
-    //     pop at every bypass crossing.
-    //
-    //   * Same-mode parameter changes are not fader-gated either: per-sub-block
-    //     coefficient interpolation in process() keeps fc moving smoothly under fast
-    //     spins.
+    // This keeps coefficient changes continuous and avoids hard IIR state discontinuities.
     void setFilterValue(float v) {
         int oldSign = (_vTarget < 0.0f) ? -1 : ((_vTarget > 0.0f) ? 1 : 0);
         int newSign = (v < 0.0f) ? -1 : ((v > 0.0f) ? 1 : 0);
         bool polarityFlip = (oldSign != 0) && (newSign != 0) && (oldSign != newSign);
         if (polarityFlip) {
-            _resetPending = true;
-            _faderIn.startFadeIn();
-            // Snap _vSmooth: interpolating across a polarity flip is meaningless because
-            // we just reset() the IIR state and the b-coefficient sign changes discretely.
-            _vSmooth = v;
+            _flipBridgeActive = true;
+            _flipBridgeToPositive = (newSign > 0);
         }
         _vTarget = v;
-        // Coefficients are not (re)computed here; process() does that per sub-block.
     }
 
     // Real-time stereo processing. Coefficients are interpolated per sub-block so fc
     // moves smoothly even when the knob is spun much faster than the audio block rate.
     void process(float* left, float* right, uint32_t n) {
-        if (_resetPending) {
-            _lpf.reset();
-            _hpf.reset();
-            _resetPending = false;
-        }
         if (n == 0) return;
 
         // Linear ramp of _vSmooth from its current value to _vTarget across this block.
@@ -185,21 +129,57 @@ public:
         //   (no asymptotic drift, so the "filter strength" the user perceives matches
         //   exactly what the parameter mapping prescribes).
         const uint32_t kSubBlock = 32;
-        uint32_t numSubs = (n + kSubBlock - 1) / kSubBlock;
-        float vStep = (_vTarget - _vSmooth) / (float)numSubs;
 
         uint32_t offset = 0;
+        uint32_t remainingSubs = (n + kSubBlock - 1) / kSubBlock;
         while (offset < n) {
             uint32_t sub = (n - offset > kSubBlock) ? kSubBlock : (n - offset);
+            float effectiveTarget = _vTarget;
+            if (_flipBridgeActive) {
+                if (_flipBridgeToPositive) {
+                    if (_vSmooth < 0.0f) {
+                        effectiveTarget = 0.0f;
+                    } else {
+                        effectiveTarget = _vTarget;
+                        if (_vTarget <= 0.0f) {
+                            _flipBridgeActive = false;
+                        }
+                    }
+                } else {
+                    if (_vSmooth > 0.0f) {
+                        effectiveTarget = 0.0f;
+                    } else {
+                        effectiveTarget = _vTarget;
+                        if (_vTarget >= 0.0f) {
+                            _flipBridgeActive = false;
+                        }
+                    }
+                }
+                if (fabsf(_vSmooth) <= kBridgeEpsilon && effectiveTarget == 0.0f) {
+                    _vSmooth = 0.0f;
+                    effectiveTarget = _vTarget;
+                }
+                int smoothSign = (_vSmooth < 0.0f) ? -1 : ((_vSmooth > 0.0f) ? 1 : 0);
+                int targetSign = (_vTarget < 0.0f) ? -1 : ((_vTarget > 0.0f) ? 1 : 0);
+                if (smoothSign == targetSign || targetSign == 0) {
+                    _flipBridgeActive = false;
+                    effectiveTarget = _vTarget;
+                }
+            }
+            float vStep = (effectiveTarget - _vSmooth) / (float)remainingSubs;
             _vSmooth += vStep;
             applyCoefficients(_vSmooth);
-            _faderIn.processStereo(left + offset, right + offset, sub);
             _hpf.processStereo(left + offset, right + offset, sub);
             _lpf.processStereo(left + offset, right + offset, sub);
             offset += sub;
+            if (remainingSubs > 0) {
+                remainingSubs--;
+            }
         }
         // Snap to exact target to remove any accumulated float rounding error.
-        _vSmooth = _vTarget;
+        if (!_flipBridgeActive) {
+            _vSmooth = _vTarget;
+        }
     }
 
     void reset() {
@@ -224,10 +204,11 @@ private:
     }
 
     static constexpr float _fs = 44100.0f;
+    static constexpr float kBridgeEpsilon = 0.02f;
     BiquadIIR _lpf;
     BiquadIIR _hpf;
-    MiniFaderIn _faderIn;
     volatile float _vTarget; // target set by setFilterValue() (control thread)
     float _vSmooth;          // actual parameter applied to coefficients (audio thread only)
-    bool _resetPending;
+    bool _flipBridgeActive;
+    bool _flipBridgeToPositive;
 };
