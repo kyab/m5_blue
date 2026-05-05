@@ -89,11 +89,12 @@ private:
     float _rx1, _rx2, _ry1, _ry2;
 };
 
-// ~1 ms linear fade-in on demand; used to mask filter transients only at *mode boundaries*
-// (LPF<->bypass, bypass<->HPF, LPF<->HPF). Same-mode parameter changes are handled by the
-// per-sub-block coefficient smoothing in DJFilter::process(), not by this fader. Triggering
-// startFadeIn() on every same-mode knob jump would cut the output to zero each time and
-// audibly produce more clicks than it prevents.
+// ~1 ms linear fade-in on demand; used to mask filter transients only at the LPF<->HPF
+// polarity flip (the one mode transition where the biquad b coefficients change sign so
+// IIR state reset is unavoidable). LPF<->bypass and bypass<->HPF do NOT trigger this
+// fader anymore: bypass is implemented as LPF=22 kHz + HPF=1 Hz, so those transitions
+// stay inside the same coefficient family and can be handled smoothly by per-sub-block
+// parameter interpolation alone.
 class MiniFaderIn {
 public:
     static constexpr uint32_t FADE_SAMPLE_NUM = 50;
@@ -127,75 +128,74 @@ public:
 
     // v in [-1, +1]. v == 0 -> bypass; v < 0 -> LPF mode; v > 0 -> HPF mode.
     //
-    // Click guard policy (revised for fast knob spins):
+    // Click-guard policy (refined after listening tests):
     //
-    //   * Mode boundary crossings (sign change of v: LPF<->bypass<->HPF, including the
-    //     direct LPF<->HPF flip when a fast spin skips the bypass deadzone) require:
-    //       - reset() of IIR state on the next process() call (the biquad b coefficients
-    //         change sign between LPF and HPF, so leaving old-mode history would produce
-    //         a large transient with new-mode coefs);
-    //       - MiniFaderIn 1 ms input ramp to mask the residual start-of-response burst;
-    //       - snapping the internal smoothed parameter (_vSmooth) to the new target so the
-    //         per-block smoother doesn't try to interpolate across the discontinuity.
+    //   * Only LPF<->HPF *polarity flips* (oldSign and newSign both nonzero, opposite
+    //     signs) are click-protected with reset() + MiniFaderIn + _vSmooth snap. This
+    //     happens when a very fast knob spin crosses the bypass deadzone in a single
+    //     update. The biquad b coefficients change sign here, so reusing IIR state
+    //     would produce a large transient.
     //
-    //   * Same-mode parameter changes are *not* fader-gated. Earlier versions tried that
-    //     and made the click problem worse on fast spins: the fader cuts the output to 0
-    //     before ramping back, so a knob that re-armed it every block produced a chain of
-    //     short audible drops. Same-mode coefficient continuity is now enforced by
-    //     interpolating _vSmooth toward _vTarget every kSubBlock samples in process(),
-    //     which keeps fc moving smoothly even when the user spins the knob much faster
-    //     than the per-block update rate.
+    //   * LPF<->bypass and bypass<->HPF are *not* click-protected. Bypass is implemented
+    //     as LPF=22 kHz + HPF=1 Hz, which lives in the *same* coefficient family as the
+    //     active mode on either side. The per-block linear ramp of _vSmooth toward
+    //     _vTarget (see process()) moves fc continuously through that family, so IIR
+    //     state stays consistent and no audible discontinuity is produced. An earlier
+    //     version reset+faded these too; the snap-then-fade caused a large coefficient
+    //     step that the 1 ms fade could not fully mask under Q=5, leaving an audible
+    //     pop at every bypass crossing.
+    //
+    //   * Same-mode parameter changes are not fader-gated either: per-sub-block
+    //     coefficient interpolation in process() keeps fc moving smoothly under fast
+    //     spins.
     void setFilterValue(float v) {
         int oldSign = (_vTarget < 0.0f) ? -1 : ((_vTarget > 0.0f) ? 1 : 0);
         int newSign = (v < 0.0f) ? -1 : ((v > 0.0f) ? 1 : 0);
-        if (oldSign != newSign) {
+        bool polarityFlip = (oldSign != 0) && (newSign != 0) && (oldSign != newSign);
+        if (polarityFlip) {
             _resetPending = true;
             _faderIn.startFadeIn();
-            // Snap the smoothed value: smoothing across a mode boundary is meaningless
-            // because we just reset() the IIR state and the LPF/HPF coefficient family
-            // changes discretely with sign(v).
+            // Snap _vSmooth: interpolating across a polarity flip is meaningless because
+            // we just reset() the IIR state and the b-coefficient sign changes discretely.
             _vSmooth = v;
         }
         _vTarget = v;
         // Coefficients are not (re)computed here; process() does that per sub-block.
     }
 
-    // Real-time stereo processing. Coefficients are interpolated per sub-block to avoid
-    // perceptible parameter steps when the knob is spun faster than the block rate.
+    // Real-time stereo processing. Coefficients are interpolated per sub-block so fc
+    // moves smoothly even when the knob is spun much faster than the audio block rate.
     void process(float* left, float* right, uint32_t n) {
         if (_resetPending) {
             _lpf.reset();
             _hpf.reset();
             _resetPending = false;
         }
-        if (_vTarget == 0.0f && fabsf(_vSmooth) < 1.0e-4f) {
-            // Steady-state bypass: snap _vSmooth exactly to zero (the smoother only
-            // approaches it asymptotically) and keep IIR state clean so a long bypass
-            // period doesn't accumulate any residual that would surface when the user
-            // next moves the knob.
-            _vSmooth = 0.0f;
-            _lpf.reset();
-            _hpf.reset();
-        }
+        if (n == 0) return;
 
-        // Sub-block coefficient smoothing.
-        //   kSubBlock = 32 samples (~0.73 ms at 44.1 kHz)
-        //   kSmoothAlpha = 0.20  -> first-order tau ~= 3.25 ms (5*tau ~= 16 ms to settle)
-        // These values trade off knob responsiveness against per-block coefficient steps.
-        // The IIR state is fully preserved across sub-block boundaries, so the only
-        // discontinuity per sub-block is the (small) coefficient delta.
+        // Linear ramp of _vSmooth from its current value to _vTarget across this block.
+        //   kSubBlock = 32 samples (~0.73 ms at 44.1 kHz). Coefficients are recomputed
+        //   at every sub-block, so the user-visible reaction time to a knob change is
+        //   one block (~5.8 ms at the default kI2SWriterFrames=256), independent of
+        //   block size, and _vSmooth is float-equal to _vTarget at the end of the block
+        //   (no asymptotic drift, so the "filter strength" the user perceives matches
+        //   exactly what the parameter mapping prescribes).
         const uint32_t kSubBlock = 32;
-        const float kSmoothAlpha = 0.20f;
+        uint32_t numSubs = (n + kSubBlock - 1) / kSubBlock;
+        float vStep = (_vTarget - _vSmooth) / (float)numSubs;
+
         uint32_t offset = 0;
         while (offset < n) {
             uint32_t sub = (n - offset > kSubBlock) ? kSubBlock : (n - offset);
-            _vSmooth += (_vTarget - _vSmooth) * kSmoothAlpha;
+            _vSmooth += vStep;
             applyCoefficients(_vSmooth);
             _faderIn.processStereo(left + offset, right + offset, sub);
             _hpf.processStereo(left + offset, right + offset, sub);
             _lpf.processStereo(left + offset, right + offset, sub);
             offset += sub;
         }
+        // Snap to exact target to remove any accumulated float rounding error.
+        _vSmooth = _vTarget;
     }
 
     void reset() {
