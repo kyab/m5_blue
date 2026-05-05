@@ -89,15 +89,14 @@ private:
     float _rx1, _rx2, _ry1, _ry2;
 };
 
-// ~1 ms linear fade-in on demand; used to mask filter transients only at the LPF<->HPF
-// polarity flip (the one mode transition where the biquad b coefficients change sign so
-// IIR state reset is unavoidable). LPF<->bypass and bypass<->HPF do NOT trigger this
-// fader anymore: bypass is implemented as LPF=22 kHz + HPF=1 Hz, so those transitions
-// stay inside the same coefficient family and can be handled smoothly by per-sub-block
-// parameter interpolation alone.
+// Post-polarity-flip mute ramp: only armed on LPF<->HPF (see DJFilter). Q=5 biquads
+// have a visibly longer transient after a coef reset than a short linear mute can hide:
+// lengthening (~6 ms here) beats obvious clicks. Uses smoothstep for zero slope at the
+// mute tail so the ramp does not reopen the input into a ringing filter with another edge.
 class MiniFaderIn {
 public:
-    static constexpr uint32_t FADE_SAMPLE_NUM = 50;
+    // ~264 samples @ 44.1 kHz (~6 ms). Only used after polarityFlip; harmless when idle.
+    static constexpr uint32_t FADE_SAMPLE_NUM = 264;
 
     MiniFaderIn() : _count(FADE_SAMPLE_NUM) {}
 
@@ -106,7 +105,12 @@ public:
     void processStereo(float* left, float* right, uint32_t n) {
         for (uint32_t i = 0; i < n; i++) {
             if (_count < FADE_SAMPLE_NUM) {
-                float rate = (float)_count / (float)FADE_SAMPLE_NUM;
+                float u = ((float)(_count + 1U)) / (float)FADE_SAMPLE_NUM;
+                if (u > 1.0f) {
+                    u = 1.0f;
+                }
+                // smoothstep(u) / smoothstep(1)==1 gives u*u*(3-2*u), du/dt ~ 0 at u=1.
+                float rate = u * u * (3.0f - 2.0f * u);
                 left[i] *= rate;
                 right[i] *= rate;
                 _count++;
