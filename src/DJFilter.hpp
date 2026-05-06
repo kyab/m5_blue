@@ -89,47 +89,108 @@ private:
     float _rx1, _rx2, _ry1, _ry2;
 };
 
-// ~1ms linear fade-in on demand; used to suppress clicks when entering bypass.
-class MiniFaderIn {
+class DJFilter {
 public:
-    static constexpr uint32_t FADE_SAMPLE_NUM = 50;
+    DJFilter() : _vTarget(0.0f), _vSmooth(0.0f), _flipBridgeActive(false), _flipBridgeToPositive(false) {
+        applyCoefficients(0.0f);
+    }
 
-    MiniFaderIn() : _count(FADE_SAMPLE_NUM) {}
+    float getFilterValue() const { return _vTarget; }
 
-    void startFadeIn() { _count = 0; }
+    // v in [-1, +1]. v == 0 -> bypass; v < 0 -> LPF mode; v > 0 -> HPF mode.
+    //
+    // Fast LPF<->HPF flips can click because biquad coefficient families effectively
+    // switch polarity. Instead of reset+mute, we bridge through bypass internally:
+    //
+    //   LPF target -> (ramp to 0) -> (ramp to HPF target), or vice versa.
+    //
+    // This keeps coefficient changes continuous and avoids hard IIR state discontinuities.
+    void setFilterValue(float v) {
+        int oldSign = (_vTarget < 0.0f) ? -1 : ((_vTarget > 0.0f) ? 1 : 0);
+        int newSign = (v < 0.0f) ? -1 : ((v > 0.0f) ? 1 : 0);
+        bool polarityFlip = (oldSign != 0) && (newSign != 0) && (oldSign != newSign);
+        if (polarityFlip) {
+            _flipBridgeActive = true;
+            _flipBridgeToPositive = (newSign > 0);
+        }
+        _vTarget = v;
+    }
 
-    void processStereo(float* left, float* right, uint32_t n) {
-        for (uint32_t i = 0; i < n; i++) {
-            if (_count < FADE_SAMPLE_NUM) {
-                float rate = (float)_count / (float)FADE_SAMPLE_NUM;
-                left[i] *= rate;
-                right[i] *= rate;
-                _count++;
+    // Real-time stereo processing. Coefficients are interpolated per sub-block so fc
+    // moves smoothly even when the knob is spun much faster than the audio block rate.
+    void process(float* left, float* right, uint32_t n) {
+        if (n == 0) return;
+
+        // Linear ramp of _vSmooth from its current value to _vTarget across this block.
+        //   kSubBlock = 32 samples (~0.73 ms at 44.1 kHz). Coefficients are recomputed
+        //   at every sub-block, so the user-visible reaction time to a knob change is
+        //   one block (~5.8 ms at the default kI2SWriterFrames=256), independent of
+        //   block size, and _vSmooth is float-equal to _vTarget at the end of the block
+        //   (no asymptotic drift, so the "filter strength" the user perceives matches
+        //   exactly what the parameter mapping prescribes).
+        const uint32_t kSubBlock = 32;
+
+        uint32_t offset = 0;
+        uint32_t remainingSubs = (n + kSubBlock - 1) / kSubBlock;
+        while (offset < n) {
+            uint32_t sub = (n - offset > kSubBlock) ? kSubBlock : (n - offset);
+            float effectiveTarget = _vTarget;
+            if (_flipBridgeActive) {
+                if (_flipBridgeToPositive) {
+                    if (_vSmooth < 0.0f) {
+                        effectiveTarget = 0.0f;
+                    } else {
+                        effectiveTarget = _vTarget;
+                        if (_vTarget <= 0.0f) {
+                            _flipBridgeActive = false;
+                        }
+                    }
+                } else {
+                    if (_vSmooth > 0.0f) {
+                        effectiveTarget = 0.0f;
+                    } else {
+                        effectiveTarget = _vTarget;
+                        if (_vTarget >= 0.0f) {
+                            _flipBridgeActive = false;
+                        }
+                    }
+                }
+                if (fabsf(_vSmooth) <= kBridgeEpsilon && effectiveTarget == 0.0f) {
+                    _vSmooth = 0.0f;
+                    effectiveTarget = _vTarget;
+                }
+                int smoothSign = (_vSmooth < 0.0f) ? -1 : ((_vSmooth > 0.0f) ? 1 : 0);
+                int targetSign = (_vTarget < 0.0f) ? -1 : ((_vTarget > 0.0f) ? 1 : 0);
+                if (smoothSign == targetSign || targetSign == 0) {
+                    _flipBridgeActive = false;
+                    effectiveTarget = _vTarget;
+                }
+            }
+            float vStep = (effectiveTarget - _vSmooth) / (float)remainingSubs;
+            _vSmooth += vStep;
+            applyCoefficients(_vSmooth);
+            _hpf.processStereo(left + offset, right + offset, sub);
+            _lpf.processStereo(left + offset, right + offset, sub);
+            offset += sub;
+            if (remainingSubs > 0) {
+                remainingSubs--;
             }
         }
+        // Snap to exact target to remove any accumulated float rounding error.
+        if (!_flipBridgeActive) {
+            _vSmooth = _vTarget;
+        }
+    }
+
+    void reset() {
+        _lpf.reset();
+        _hpf.reset();
     }
 
 private:
-    uint32_t _count;
-};
-
-class DJFilter {
-public:
-    DJFilter() : _v(0.0f) {
-        setFilterValue(0.0f);
-    }
-
-    float getFilterValue() const { return _v; }
-
-    // v in [-1, +1]. v == 0 -> bypass; v < 0 -> LPF mode; v > 0 -> HPF mode.
-    // Fires MiniFaderIn when transitioning from nonzero back to 0 (click guard).
-    void setFilterValue(float v) {
-        if (_v != 0.0f && v == 0.0f) {
-            _faderIn.startFadeIn();
-        }
-        _v = v;
+    // Translate a smoothed v in [-1, +1] into LPF/HPF cutoffs (Going-Zero mapping).
+    void applyCoefficients(float v) {
         float vs = v / 1.3f;
-
         const float kLog2_22000 = 14.425215f; // log2f(22000.0f)
         if (vs < 0.0f) {
             float fc = powf(2.0f + vs, kLog2_22000);
@@ -142,27 +203,12 @@ public:
         }
     }
 
-    // Real-time stereo processing. Bypass + reset when v == 0 exactly.
-    void process(float* left, float* right, uint32_t n) {
-        if (_v == 0.0f) {
-            _lpf.reset();
-            _hpf.reset();
-            return;
-        }
-        _faderIn.processStereo(left, right, n);
-        _hpf.processStereo(left, right, n);
-        _lpf.processStereo(left, right, n);
-    }
-
-    void reset() {
-        _lpf.reset();
-        _hpf.reset();
-    }
-
-private:
     static constexpr float _fs = 44100.0f;
+    static constexpr float kBridgeEpsilon = 0.02f;
     BiquadIIR _lpf;
     BiquadIIR _hpf;
-    MiniFaderIn _faderIn;
-    volatile float _v;
+    volatile float _vTarget; // target set by setFilterValue() (control thread)
+    float _vSmooth;          // actual parameter applied to coefficients (audio thread only)
+    bool _flipBridgeActive;
+    bool _flipBridgeToPositive;
 };
