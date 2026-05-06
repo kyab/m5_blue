@@ -452,9 +452,13 @@ static void debug_log(const char* hid, const char* msg, const char* data, int li
 
 // Startup pop debugging: log step then delay so user can hear when pop occurs (step id in log).
 static const int kStartupStepDelayMs = 10;
+static uint32_t s_prev_startup_step_us = 0;
 static void startup_step(const char* step_id, const char* step_name) {
-    Serial.printf("{\"ts\":%lu,\"startup_step\":\"%s\",\"name\":\"%s\"}\n",
-                  (unsigned long)millis(), step_id, step_name);
+    uint32_t now_us = (uint32_t)micros();
+    uint32_t delta_us = (s_prev_startup_step_us == 0) ? 0 : (uint32_t)(now_us - s_prev_startup_step_us);
+    s_prev_startup_step_us = now_us;
+    Serial.printf("{\"ts\":%lu,\"ts_us\":%lu,\"dt_us\":%lu,\"startup_step\":\"%s\",\"name\":\"%s\"}\n",
+                  (unsigned long)millis(), (unsigned long)now_us, (unsigned long)delta_us, step_id, step_name);
     delay(kStartupStepDelayMs);
 }
 // #endregion
