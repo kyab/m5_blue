@@ -8,6 +8,7 @@
 #include "RingBuffer.hpp"
 #include "DJFilter.hpp"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <algorithm>
@@ -463,6 +464,13 @@ static void startup_step(const char* step_id, const char* step_name) {
 }
 // #endregion
 
+static bool is_warm_boot_reset_reason(esp_reset_reason_t reason) {
+    return reason == ESP_RST_SW || reason == ESP_RST_EXT || reason == ESP_RST_PANIC || reason == ESP_RST_TASK_WDT
+        || reason == ESP_RST_WDT || reason == ESP_RST_INT_WDT;
+}
+
+static const uint32_t kWarmBootPreUnmuteDelayMs = 250;
+
 static inline int16_t make_tpdf_dither_sample() {
     uint32_t w = esp_random();
     int32_t d = (int32_t)(w & 0x7FFFu) - (int32_t)((w >> 15) & 0x7FFFu);
@@ -747,6 +755,10 @@ void setup() {
     delay(1000);
     startup_step("S02", "Serial.begin");
 
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    bool warm_boot_reset = is_warm_boot_reset_reason(reset_reason);
+    ESP_LOGI("main", "Reset reason=%d warm_boot=%d", (int)reset_reason, warm_boot_reset ? 1 : 0);
+
     // Reduce log level to avoid performance issues
     esp_log_level_set("*", ESP_LOG_INFO);
     // AVRCP absolute-volume logging is demoted to ESP_LOGD in the ESP32-A2DP submodule; BT_AV WARN is an extra guard.
@@ -822,6 +834,12 @@ void setup() {
     startup_step("S06", "DAC_config");
 
     // DACCONTROL3 (0x19): bit5 = DACSoftRamp, bit1 = DACMute. Set SoftRamp, clear Mute (unmute).
+    if (warm_boot_reset) {
+        // Warm USB resets can re-run setup while analog rails and clocks are still settling.
+        // Keep DAC muted briefly before the first unmute transition to reduce startup pop risk.
+        ESP_LOGI("main", "Warm-boot guard: delay %lu ms before DAC unmute", (unsigned long)kWarmBootPreUnmuteDelayMs);
+        delay(kWarmBootPreUnmuteDelayMs);
+    }
     {
         uint8_t reg25 = 0x00;
         Wire.beginTransmission(ES8388_ADDR);
