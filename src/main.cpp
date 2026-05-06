@@ -8,6 +8,7 @@
 #include "RingBuffer.hpp"
 #include "DJFilter.hpp"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <algorithm>
@@ -401,6 +402,10 @@ RingBufferInterleaved* g_ring = nullptr;
 volatile bool g_effect_blue = false; // Volume reduction
 volatile bool g_effect_red = false;  // Delay effect
 
+// Until setup finishes volume ramp, feed digital zeros on I2S (not TPDF dither) to limit
+// SD pin activity while the analog path is still coming up; dither resumes after ramp.
+volatile bool g_feed_zero_pcm_until_ready = true;
+
 // DJ Filter (Going-Zero port): knob-driven LPF/HPF crossover
 static DJFilter g_dj_filter;
 static volatile float g_dj_filter_target_value = 0.0f;
@@ -437,8 +442,8 @@ static void debug_log(const char* hid, const char* msg, const char* data, int li
 }
 #define DEBUG_LOG(hid, msg, data) debug_log(hid, msg, data, __LINE__)
 
-// Startup pop debugging: keep JSON step logs, but default to no artificial startup wait.
-static const int kStartupStepDelayMs = 0;
+// Startup pop debugging: keep each step long enough for audible correlation.
+static const int kStartupStepDelayMs = 1500;
 static const bool kEnableStartupI2CScan = false;
 static const int kSerialStartupDelayMs = 100;
 static void startup_step(const char* step_id, const char* step_name) {
@@ -505,7 +510,6 @@ static void configure_mclk_output() {
 
 static void configure_i2s_stream() {
     ESP_LOGI("main", "Configuring I2SStream for Module Audio...");
-    i2s.end();
     auto i2s_cfg = i2s.defaultConfig();
     i2s_cfg.sample_rate = kSampleRate;
     i2s_cfg.channels = 2;
@@ -563,24 +567,53 @@ static void init_audio_i2c_device() {
     device.setRGBLED(0, 0x0000FF); // Blue - waiting
 }
 
-static void configure_es8388_codec() {
-    ESP_LOGI("main", "Initializing ES8388 codec...");
-    if (!es8388.init()) {
-        ESP_LOGE("main", "Failed to initialize ES8388!");
-        M5.Display.setTextColor(RED);
-        M5.Display.println("ES8388: FAILED!");
+static void disable_es8388_mixer_bypass();
+
+static bool s_es8388_codec_prepare_ok = false;
+
+// ES8388 is I2S slave: bringing I2S BCLK/LRCK up first stabilizes init on Module Audio (init before
+// clocks was observed to fail I2C / return false from es8388.init()).
+static bool prepare_es8388_codec() {
+    s_es8388_codec_prepare_ok = false;
+    esp_reset_reason_t rr = esp_reset_reason();
+    bool need_full_init = (rr == ESP_RST_POWERON || rr == ESP_RST_BROWNOUT || rr == ESP_RST_UNKNOWN);
+    if (need_full_init) {
+        ESP_LOGI("main", "Initializing ES8388 codec (full init, reset_reason=%d)...", (int)rr);
+        bool ok = false;
+        const int kInitAttempts = 4;
+        for (int attempt = 1; attempt <= kInitAttempts; ++attempt) {
+            if (es8388.init()) {
+                ok = true;
+                ESP_LOGI("main", "ES8388 OK (init attempt %d/%d)", attempt, kInitAttempts);
+                M5.Display.setTextColor(GREEN);
+                M5.Display.println("ES8388: OK");
+                break;
+            }
+            ESP_LOGW("main", "ES8388 init failed (attempt %d/%d), retrying...", attempt, kInitAttempts);
+            delay(50);
+        }
+        if (!ok) {
+            ESP_LOGE("main", "Failed to initialize ES8388 after %d attempts", kInitAttempts);
+            M5.Display.setTextColor(RED);
+            M5.Display.println("ES8388: FAILED!");
+            return false;
+        }
     } else {
-        ESP_LOGI("main", "ES8388 OK");
+        // ESP32-only reboot path: avoid full codec re-init to reduce pop noise on live analog state.
+        ESP_LOGI("main", "Skipping full ES8388 init on warm reset (reset_reason=%d)", (int)rr);
         M5.Display.setTextColor(GREEN);
-        M5.Display.println("ES8388: OK");
+        M5.Display.println("ES8388: warm reset");
     }
 
     // Library bug: Module-Audio setDACmute() reads ES8388_ADCCONTROL1 (0x09) but writes
     // ES8388_DACCONTROL3 (0x19), corrupting DACCONTROL3. Do not use setDACmute().
     es8388.setDACOutput(DAC_OUTPUT_OUT1);
-    es8388.setDACVolume(100);
+    es8388.setDACVolume(0);
     es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
     es8388.setSampleRate(SAMPLE_RATE_44K);
+    disable_es8388_mixer_bypass();
+    s_es8388_codec_prepare_ok = true;
+    return true;
 }
 
 static void unmute_es8388_without_changing_soft_ramp() {
@@ -615,6 +648,29 @@ static void disable_es8388_mixer_bypass() {
     } else {
         ESP_LOGW("main", "Failed to update ES8388 DACCONTROL20");
     }
+}
+
+static void ramp_dac_volume(uint8_t from_volume, uint8_t to_volume, uint8_t step, uint32_t step_delay_ms) {
+    if (step == 0) step = 1;
+    if (from_volume > 100) from_volume = 100;
+    if (to_volume > 100) to_volume = 100;
+    es8388.setDACVolume(from_volume);
+    if (from_volume == to_volume) {
+        return;
+    }
+
+    if (from_volume < to_volume) {
+        for (uint8_t v = (uint8_t)(from_volume + step); v < to_volume; v = (uint8_t)(v + step)) {
+            es8388.setDACVolume(v);
+            delay(step_delay_ms);
+        }
+    } else {
+        for (int v = (int)from_volume - (int)step; v > (int)to_volume; v -= (int)step) {
+            es8388.setDACVolume((uint8_t)v);
+            delay(step_delay_ms);
+        }
+    }
+    es8388.setDACVolume(to_volume);
 }
 
 static inline int16_t make_tpdf_dither_sample() {
@@ -762,7 +818,11 @@ static void i2s_writer_task(void* arg) {
                 fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
             }
         } else {
-            fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
+            if (g_feed_zero_pcm_until_ready) {
+                memset(s_i2s_writer_bytes, 0, block_bytes);
+            } else {
+                fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
+            }
         }
         apply_effects_before_i2s(reinterpret_cast<int16_t*>(s_i2s_writer_bytes), block_frames, write_bt_pcm);
         uint32_t write_start_us = (uint32_t)micros();
@@ -849,30 +909,37 @@ void setup() {
     M5.Speaker.end();
     startup_step("S05", "M5.Speaker.end");
 
-    // I2S path first: keep dither writes running before codec unmute.
-    configure_mclk_output();
-    startup_step("S06", "MCLK_GPIO0");
-
-    configure_i2s_stream();
-    startup_step("S07", "i2s.begin");
-    start_i2s_writer_if_needed();
-    startup_step("S08", "i2s_writer.start");
-
-    // Prepare I2C after the I2S writer is already feeding non-zero dither.
+    // Shared I2C bus for ES8388 and Module-Audio peripherals; bring up before codec or displays need it.
     Wire.begin(SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN, 400000L);
-    startup_step("S09", "Wire.begin");
-    maybe_scan_i2c_bus();
-    startup_step("S10", "I2C_scan");
-    init_audio_i2c_device();
-    startup_step("S11", "AudioI2c");
+    startup_step("S06", "Wire.begin");
 
-    // Configure codec after I2S is already stable.
-    configure_es8388_codec();
-    startup_step("S12", "ES8388_init_and_config");
-    disable_es8388_mixer_bypass();
-    startup_step("S13", "DAC_Mixer_Bypass_Off");
-    unmute_es8388_without_changing_soft_ramp();
-    startup_step("S14", "DAC_unmute_keep_default_ramp");
+    configure_mclk_output();
+    startup_step("S07", "MCLK_GPIO0");
+
+    // Start I2S clocks before codec init so the ES8388 slave interface sees valid LRCK/BCLK.
+    configure_i2s_stream();
+    startup_step("S08", "i2s.begin");
+    delay(30);
+
+    if (!prepare_es8388_codec()) {
+        ESP_LOGE("main", "Codec bring-up failed; continuing without unmute/volume ramp (check I2C wiring)");
+    }
+    startup_step("S09", "ES8388_prepare_after_i2s_clocks");
+
+    start_i2s_writer_if_needed();
+    startup_step("S10", "i2s_writer.start");
+
+    maybe_scan_i2c_bus();
+    startup_step("S11", "I2C_scan");
+    init_audio_i2c_device();
+    startup_step("S12", "AudioI2c");
+
+    if (s_es8388_codec_prepare_ok) {
+        unmute_es8388_without_changing_soft_ramp();
+    } else {
+        ESP_LOGW("main", "Skipping DAC unmute: ES8388 prepare did not complete successfully");
+    }
+    startup_step("S13", "DAC_unmute_keep_default_ramp");
 
     // Setup A2DP callbacks
     a2dp_sink.set_on_connection_state_changed(connection_state_callback);
@@ -896,9 +963,19 @@ void setup() {
     ESP_LOGI("main", "Starting Bluetooth A2DP Sink...");
     M5.Display.setTextColor(CYAN);
     M5.Display.println("\nStarting BT...");
-    startup_step("S15", "before_a2dp.start");
+    startup_step("S14", "before_a2dp.start");
     a2dp_sink.start("M5Blue");
-    startup_step("S16", "after_a2dp.start");
+    startup_step("S15", "after_a2dp.start");
+
+    // Final stage for startup-noise diagnosis: avoid a sharp 0->70 jump by ramping DAC volume.
+    if (s_es8388_codec_prepare_ok) {
+        ramp_dac_volume(0, 70, 2, 8);
+    } else {
+        ESP_LOGW("main", "Skipping DAC volume ramp: ES8388 prepare failed");
+    }
+    delay(50);
+    g_feed_zero_pcm_until_ready = false;
+    startup_step("S16", "DAC_volume_70_final");
     // Reinforce after BT stack init (ESP32-A2DP fork uses ESP_LOGD for AVRCP volume paths).
     esp_log_level_set("BT_AV", ESP_LOG_WARN);
 
