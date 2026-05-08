@@ -417,8 +417,10 @@ static const int32_t kSilenceDitherLsbScale = 2;        // ~2 LSB RMS; >>15 afte
 volatile esp_a2d_connection_state_t g_bt_connection_state = ESP_A2D_CONNECTION_STATE_DISCONNECTED;
 volatile esp_a2d_audio_state_t g_a2dp_audio_state = ESP_A2D_AUDIO_STATE_STOPPED;
 volatile bool g_bt_state_display_dirty = true;
+volatile bool g_a2dp_connected = false;
 volatile int g_host_volume_127 = 127;
 volatile bool g_host_volume_dirty = true;
+volatile bool g_host_volume_received = false;
 volatile bool g_force_silent_output = false;
 
 enum class DacVolumeCurve {
@@ -643,6 +645,22 @@ void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
     ESP_LOGI("a2dp", "Connection state: %s", state_str[state]);
     g_bt_connection_state = state;
     g_bt_state_display_dirty = true;
+    g_a2dp_connected = (state == ESP_A2D_CONNECTION_STATE_CONNECTED);
+    if (!g_a2dp_connected) {
+        g_force_silent_output = true;
+        if (s_last_applied_dac_volume != 0) {
+            if (es8388.setDACVolume(0)) {
+                s_last_applied_dac_volume = 0;
+                ESP_LOGI("main", "A2DP disconnected -> DAC volume=0");
+            } else {
+                ESP_LOGW("main", "A2DP disconnected but failed to set DAC volume=0");
+            }
+        }
+    } else if (g_host_volume_received) {
+        g_host_volume_dirty = true;
+    } else {
+        ESP_LOGI("main", "A2DP connected: waiting for host volume event before raising DAC volume");
+    }
 
 }
 
@@ -689,11 +707,14 @@ static int map_host_volume_to_dac(int host_volume_127) {
 static void handle_host_volume_change(int host_volume_127) {
     if (host_volume_127 < 0) host_volume_127 = 0;
     if (host_volume_127 > 127) host_volume_127 = 127;
+    g_host_volume_received = true;
     g_host_volume_127 = host_volume_127;
-    g_host_volume_dirty = true;
+    g_host_volume_dirty = g_a2dp_connected;
 }
 
 static void apply_host_volume_to_dac_if_needed() {
+    if (!g_a2dp_connected) return;
+    if (!g_host_volume_received) return;
     if (!g_host_volume_dirty) return;
     int host_volume = g_host_volume_127;
     int dac_volume = map_host_volume_to_dac(host_volume);
@@ -790,8 +811,8 @@ void setup() {
 
     // Configure the DAC path once. Avoid runtime mute/volume switching in the audio path.
     es8388.setDACOutput(DAC_OUTPUT_OUT1);
-    es8388.setDACVolume(100);
-    s_last_applied_dac_volume = 100;
+    es8388.setDACVolume(0);
+    s_last_applied_dac_volume = 0;
     es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
     es8388.setSampleRate(SAMPLE_RATE_44K);
     startup_step("S06", "DAC_config");
