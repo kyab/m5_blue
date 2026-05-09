@@ -417,6 +417,20 @@ static const int32_t kSilenceDitherLsbScale = 2;        // ~2 LSB RMS; >>15 afte
 volatile esp_a2d_connection_state_t g_bt_connection_state = ESP_A2D_CONNECTION_STATE_DISCONNECTED;
 volatile esp_a2d_audio_state_t g_a2dp_audio_state = ESP_A2D_AUDIO_STATE_STOPPED;
 volatile bool g_bt_state_display_dirty = true;
+volatile bool g_a2dp_connected = false;
+volatile int g_host_volume_127 = 127;
+volatile bool g_host_volume_dirty = true;
+volatile bool g_host_volume_received = false;
+volatile bool g_force_silent_output = false;
+
+enum class DacVolumeCurve {
+    Linear,
+    Gamma16,
+    ExpK3,
+};
+
+static DacVolumeCurve s_dac_volume_curve = DacVolumeCurve::Linear;
+static int s_last_applied_dac_volume = -1;
 
 static void update_bt_status_display() {
     if (!g_bt_state_display_dirty) return;
@@ -437,7 +451,7 @@ static void debug_log(const char* hid, const char* msg, const char* data, int li
 #define DEBUG_LOG(hid, msg, data) debug_log(hid, msg, data, __LINE__)
 
 // Startup pop debugging: log step then delay so user can hear when pop occurs (step id in log).
-static const int kStartupStepDelayMs = 1000;
+static const int kStartupStepDelayMs = 10;
 static void startup_step(const char* step_id, const char* step_name) {
     Serial.printf("{\"ts\":%lu,\"startup_step\":\"%s\",\"name\":\"%s\"}\n",
                   (unsigned long)millis(), step_id, step_name);
@@ -489,6 +503,12 @@ static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool f
     bool red_enabled = g_effect_red;
 
     if (from_bt_pcm) {
+        if (g_force_silent_output) {
+            memset(data, 0, frame_count * kStereoChannels * sizeof(int16_t));
+            // Keep dither injection alive even in forced-silent mode to avoid hard zero-idle transitions.
+            add_silence_dither_if_needed(data, frame_count);
+            return;
+        }
         if (g_ring != nullptr && red_enabled && !s_delay_effect_active) {
             g_ring->syncPositon();
             g_ring->advanceReadPosition(-44100); // ~1 second delay
@@ -625,6 +645,22 @@ void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
     ESP_LOGI("a2dp", "Connection state: %s", state_str[state]);
     g_bt_connection_state = state;
     g_bt_state_display_dirty = true;
+    g_a2dp_connected = (state == ESP_A2D_CONNECTION_STATE_CONNECTED);
+    if (!g_a2dp_connected) {
+        g_force_silent_output = true;
+        if (s_last_applied_dac_volume != 0) {
+            if (es8388.setDACVolume(0)) {
+                s_last_applied_dac_volume = 0;
+                ESP_LOGI("main", "A2DP disconnected -> DAC volume=0");
+            } else {
+                ESP_LOGW("main", "A2DP disconnected but failed to set DAC volume=0");
+            }
+        }
+    } else if (g_host_volume_received) {
+        g_host_volume_dirty = true;
+    } else {
+        ESP_LOGI("main", "A2DP connected: waiting for host volume event before raising DAC volume");
+    }
 
 }
 
@@ -641,6 +677,61 @@ void audio_state_callback_debug(esp_a2d_audio_state_t state, void* obj) {
     DEBUG_LOG("H5", "a2dp_audio_state", s_dbg);
 }
 // #endregion
+
+static int map_host_volume_to_dac(int host_volume_127) {
+    if (host_volume_127 <= 0) return 0;
+    if (host_volume_127 >= 127) return 100;
+
+    float x = (float)host_volume_127 / 127.0f;
+    float mapped = 0.0f;
+    switch (s_dac_volume_curve) {
+        case DacVolumeCurve::Linear:
+            mapped = x;
+            break;
+        case DacVolumeCurve::Gamma16:
+            mapped = powf(x, 1.6f);
+            break;
+        case DacVolumeCurve::ExpK3:
+            mapped = (expf(3.0f * x) - 1.0f) / (expf(3.0f) - 1.0f);
+            break;
+        default:
+            mapped = x;
+            break;
+    }
+    int dac_volume = (int)lroundf(100.0f * mapped);
+    if (dac_volume < 0) dac_volume = 0;
+    if (dac_volume > 100) dac_volume = 100;
+    return dac_volume;
+}
+
+static void handle_host_volume_change(int host_volume_127) {
+    if (host_volume_127 < 0) host_volume_127 = 0;
+    if (host_volume_127 > 127) host_volume_127 = 127;
+    g_host_volume_received = true;
+    g_host_volume_127 = host_volume_127;
+    g_host_volume_dirty = g_a2dp_connected;
+}
+
+static void apply_host_volume_to_dac_if_needed() {
+    if (!g_a2dp_connected) return;
+    if (!g_host_volume_received) return;
+    if (!g_host_volume_dirty) return;
+    int host_volume = g_host_volume_127;
+    int dac_volume = map_host_volume_to_dac(host_volume);
+    g_force_silent_output = (host_volume == 0);
+    if (dac_volume == s_last_applied_dac_volume) {
+        ESP_LOGD("main", "skip DAC volume write: host=%d dac=%d (same)", host_volume, dac_volume);
+        g_host_volume_dirty = false;
+        return;
+    }
+    if (es8388.setDACVolume((uint8_t)dac_volume)) {
+        s_last_applied_dac_volume = dac_volume;
+        ESP_LOGI("main", "host volume=%d -> dac volume=%d (curve=%d)", host_volume, dac_volume, (int)s_dac_volume_curve);
+    } else {
+        ESP_LOGW("main", "failed DAC volume update: host=%d dac=%d", host_volume, dac_volume);
+    }
+    g_host_volume_dirty = false;
+}
 
 void setup() {
     // Initialize M5Unified
@@ -720,7 +811,8 @@ void setup() {
 
     // Configure the DAC path once. Avoid runtime mute/volume switching in the audio path.
     es8388.setDACOutput(DAC_OUTPUT_OUT1);
-    es8388.setDACVolume(100);
+    es8388.setDACVolume(0);
+    s_last_applied_dac_volume = 0;
     es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
     es8388.setSampleRate(SAMPLE_RATE_44K);
     startup_step("S06", "DAC_config");
@@ -827,6 +919,8 @@ void setup() {
     // Setup A2DP callbacks
     a2dp_sink.set_on_connection_state_changed(connection_state_callback);
     a2dp_sink.set_on_audio_state_changed(audio_state_callback_debug, nullptr);
+    a2dp_sink.set_digital_volume_control(false);
+    a2dp_sink.set_on_volumechange(handle_host_volume_change);
 
     // Keep Bluetooth ingress lightweight; effects are applied in the I2S writer task.
     a2dp_sink.set_raw_stream_reader_writer(audio_callback);
@@ -873,6 +967,7 @@ void loop() {
     M5.update();
     control_stats_note_us(s_control_stats.m5_update_us_min, s_control_stats.m5_update_us_max, s_control_stats.m5_update_us_sum, (uint32_t)micros() - section_start_us);
     update_bt_status_display();
+    apply_host_volume_to_dac_if_needed();
 
     section_start_us = (uint32_t)micros();
     // Read dual button states
