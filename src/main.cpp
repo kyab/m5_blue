@@ -452,7 +452,10 @@ static void debug_log(const char* hid, const char* msg, const char* data, int li
 #define DEBUG_LOG(hid, msg, data) debug_log(hid, msg, data, __LINE__)
 
 // Startup pop debugging: log step then delay so user can hear when pop occurs (step id in log).
-static const int kStartupStepDelayMs = 10;
+#ifndef STARTUP_STEP_DELAY_MS
+#define STARTUP_STEP_DELAY_MS 1000
+#endif
+static const int kStartupStepDelayMs = STARTUP_STEP_DELAY_MS;
 static uint32_t s_prev_startup_step_us = 0;
 static void startup_step(const char* step_id, const char* step_name) {
     uint32_t now_us = (uint32_t)micros();
