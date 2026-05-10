@@ -450,9 +450,9 @@ static void debug_log(const char* hid, const char* msg, const char* data, int li
 }
 #define DEBUG_LOG(hid, msg, data) debug_log(hid, msg, data, __LINE__)
 
-// Startup step trace: minimal delay between steps (override with -DSTARTUP_STEP_DELAY_MS=...).
+// Startup step trace: default no delay (-DSTARTUP_STEP_DELAY_MS to override).
 #ifndef STARTUP_STEP_DELAY_MS
-#define STARTUP_STEP_DELAY_MS 10
+#define STARTUP_STEP_DELAY_MS 0
 #endif
 static const int kStartupStepDelayMs = STARTUP_STEP_DELAY_MS;
 static uint32_t s_prev_startup_step_us = 0;
@@ -755,7 +755,6 @@ void setup() {
     startup_step("S01", "M5.begin");
 
     Serial.begin(115200);
-    delay(400);
     startup_step("S02", "Serial.begin");
 
     // Reduce log level to avoid performance issues
@@ -815,7 +814,11 @@ void setup() {
 
     ESP_LOGI("main", "Initializing ES8388 codec...");
     // Patched Module-Audio: init() asserts DAC mute + volume 0. Do not use setDACmute() (broken RMW).
-    if (!es8388.init()) {
+    bool es8388_inited = es8388.init();
+    if (!es8388_inited) {
+        es8388_inited = es8388.init();
+    }
+    if (!es8388_inited) {
         ESP_LOGE("main", "Failed to initialize ES8388!");
         M5.Display.setTextColor(RED);
         M5.Display.println("ES8388: FAILED!");
