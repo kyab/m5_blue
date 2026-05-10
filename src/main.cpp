@@ -450,14 +450,29 @@ static void debug_log(const char* hid, const char* msg, const char* data, int li
 }
 #define DEBUG_LOG(hid, msg, data) debug_log(hid, msg, data, __LINE__)
 
-// Startup pop debugging: log step then delay so user can hear when pop occurs (step id in log).
-static const int kStartupStepDelayMs = 10;
+// Startup step trace: default no delay (-DSTARTUP_STEP_DELAY_MS to override).
+#ifndef STARTUP_STEP_DELAY_MS
+#define STARTUP_STEP_DELAY_MS 0
+#endif
+static const int kStartupStepDelayMs = STARTUP_STEP_DELAY_MS;
+static uint32_t s_prev_startup_step_us = 0;
 static void startup_step(const char* step_id, const char* step_name) {
-    Serial.printf("{\"ts\":%lu,\"startup_step\":\"%s\",\"name\":\"%s\"}\n",
-                  (unsigned long)millis(), step_id, step_name);
+    uint32_t now_us = (uint32_t)micros();
+    uint32_t delta_us = (s_prev_startup_step_us == 0) ? 0 : (uint32_t)(now_us - s_prev_startup_step_us);
+    s_prev_startup_step_us = now_us;
+    Serial.printf("\n--- SETUP %s | %s | millis=%lu ts_us=%lu dt_us=%lu ---\n", step_id, step_name,
+                  (unsigned long)millis(), (unsigned long)now_us, (unsigned long)delta_us);
+    Serial.printf("{\"ts\":%lu,\"ts_us\":%lu,\"dt_us\":%lu,\"startup_step\":\"%s\",\"name\":\"%s\"}\n",
+                  (unsigned long)millis(), (unsigned long)now_us, (unsigned long)delta_us, step_id, step_name);
+    ESP_LOGI("SETUP_STEP", "%s  %s", step_id, step_name);
     delay(kStartupStepDelayMs);
 }
 // #endregion
+
+static void pin_module_audio_mclk_gpio0() {
+    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
+    WRITE_PERI_REG(PIN_CTRL, 0xFFF0);
+}
 
 static inline int16_t make_tpdf_dither_sample() {
     uint32_t w = esp_random();
@@ -740,7 +755,6 @@ void setup() {
     startup_step("S01", "M5.begin");
 
     Serial.begin(115200);
-    delay(1000);
     startup_step("S02", "Serial.begin");
 
     // Reduce log level to avoid performance issues
@@ -790,12 +804,21 @@ void setup() {
     }
     startup_step("S04", "AudioI2c");
 
-    // ES8388 init: Pops are avoided by using a local patched Module-Audio (lib/Module-Audio):
-    // init() leaves DAC muted (DACCONTROL3=0x02) and Lout/Rout volume at 0; we unmute after SoftRamp in S07.
-    // Upstream init() does DACPOWER=0x3F then DACCONTROL3=0x00 (unmute), which causes two pops.
-    // Upstream setDACmute() is broken (reads ADCCONTROL1, writes DACCONTROL3) — we use direct I2C for DACCONTROL3.
+    // Core2 onboard speaker/analog pins overlap Module Audio MCLK/I2S; release driver first.
+    M5.Speaker.end();
+    startup_step("S05", "M5.Speaker.end");
+
+    // Codec needs MCLK from the host before I2C initialization sequence completes reliably.
+    pin_module_audio_mclk_gpio0();
+    startup_step("S06", "MCLK_GPIO0");
+
     ESP_LOGI("main", "Initializing ES8388 codec...");
-    if (!es8388.init()) {
+    // Patched Module-Audio: init() asserts DAC mute + volume 0. Do not use setDACmute() (broken RMW).
+    bool es8388_inited = es8388.init();
+    if (!es8388_inited) {
+        es8388_inited = es8388.init();
+    }
+    if (!es8388_inited) {
         ESP_LOGE("main", "Failed to initialize ES8388!");
         M5.Display.setTextColor(RED);
         M5.Display.println("ES8388: FAILED!");
@@ -804,20 +827,17 @@ void setup() {
         M5.Display.setTextColor(GREEN);
         M5.Display.println("ES8388: OK");
     }
-    startup_step("S05", "ES8388_init");
+    startup_step("S07", "ES8388_init");
 
-    // Library bug: Module-Audio setDACmute() reads ES8388_ADCCONTROL1 (0x09) but writes
-    // ES8388_DACCONTROL3 (0x19), corrupting DACCONTROL3. Do not use setDACmute(); use direct I2C on DACCONTROL3.
+    // Library bug: Module-Audio setDACmute() reads ES8388_ADCCONTROL1 but writes DACCONTROL3 — unused.
 
-    // Configure the DAC path once. Avoid runtime mute/volume switching in the audio path.
     es8388.setDACOutput(DAC_OUTPUT_OUT1);
     es8388.setDACVolume(0);
     s_last_applied_dac_volume = 0;
     es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
     es8388.setSampleRate(SAMPLE_RATE_44K);
-    startup_step("S06", "DAC_config");
 
-    // DACCONTROL3 (0x19): bit5 = DACSoftRamp, bit1 = DACMute. Set SoftRamp, clear Mute (unmute).
+    // DACCONTROL3 (0x19): bit5 = DACSoftRamp, bit1 = DACMute. Hold muted until I2S feeds PCM.
     {
         uint8_t reg25 = 0x00;
         Wire.beginTransmission(ES8388_ADDR);
@@ -826,24 +846,18 @@ void setup() {
         if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
             reg25 = Wire.read();
         }
-        reg25 = (reg25 & ~0x02u) | 0x20u;  // clear Mute (bit1), set SoftRamp (bit5)
+        reg25 = (reg25 | 0x20u) | 0x02u;
         Wire.beginTransmission(ES8388_ADDR);
         Wire.write(ES8388_DACCONTROL3);
         Wire.write(reg25);
         if (Wire.endTransmission() == 0) {
-            ESP_LOGI("main", "ES8388 DACCONTROL3=0x%02X (SoftRamp on, unmute)", reg25);
+            ESP_LOGI("main", "ES8388 DACCONTROL3=0x%02X (SoftRamp + digital mute)", reg25);
         }
     }
-    startup_step("S07", "DAC_SoftRamp");
+    startup_step("S08", "DAC_config");
 
-    // Disable LI2LO / RI2RO analog bypass in the ES8388 output mixer. The Module-Audio
-    // driver init() leaves these enabled (DACCONTROL17/20 = 0xD0 => LD2LO=1, LI2LO=1),
-    // which routes LINPUT/RINPUT directly into the HP output mixer. On Module Audio,
-    // LIN1 is wired (via Q1 + R8/R9) to the TRRS jack MIC contact; with a plain TRRS
-    // earphone (no mic) that pin is floating and picks up digital noise, producing a
-    // left-only hiss. Plugging a TRS plug shorts MIC to GND and the hiss disappears.
-    // Clearing bit6 (LI2LO / RI2RO) on both registers removes the leak path entirely.
-    // Verified on the noise-test build; see src/main_noise_test.cpp.
+    // Disable LI2LO / RI2RO analog bypass in the ES8388 output mixer. The Module-Audio driver init()
+    // leaves mixer paths that leak noise from LIN/RIN into the headphone mix on Module Audio wiring.
     {
         uint8_t reg27 = 0x00;
         Wire.beginTransmission(ES8388_ADDR);
@@ -871,43 +885,28 @@ void setup() {
         Wire.write(reg2a_new);
         Wire.endTransmission();
 
-        ESP_LOGI("main", "ES8388 DACCONTROL17: 0x%02X -> 0x%02X (LI2LO disabled)", reg27, reg27_new);
-        ESP_LOGI("main", "ES8388 DACCONTROL20: 0x%02X -> 0x%02X (RI2RO disabled)", reg2a, reg2a_new);
+        ESP_LOGI("main", "ES8388 DACCONTROL17: 0x%02X -> 0x%02X (LI2LO off)", reg27, reg27_new);
+        ESP_LOGI("main", "ES8388 DACCONTROL20: 0x%02X -> 0x%02X (RI2RO off)", reg2a, reg2a_new);
     }
-    startup_step("S07b", "DAC_Mixer_Bypass_Off");
+    startup_step("S09", "DAC_Mixer_Bypass_Off");
 
-    // Configure MCLK output on GPIO0 (required for ES8388)
-    ESP_LOGI("main", "Configuring MCLK output on GPIO0...");
-    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
-    WRITE_PERI_REG(PIN_CTRL, 0xFFF0);
-    startup_step("S08", "MCLK_GPIO0");
-
-    // Initialize ring buffer for delay effect
     ESP_LOGI("main", "Initializing ring buffer...");
     g_ring = new RingBufferInterleaved();
     ESP_LOGI("main", "Ring buffer OK");
-    startup_step("S09", "ring_buffer");
+    startup_step("S10", "ring_buffer");
 
-    // Disable internal speaker (use Module Audio instead)
-    M5.Speaker.end();
-    startup_step("S10", "M5.Speaker.end");
-
-    // Configure I2SStream for Module Audio
-    // Must call end() first to clear default config, then reconfigure
     ESP_LOGI("main", "Configuring I2SStream for Module Audio...");
-    i2s.end(); // Clear any default config
+    i2s.end();
     startup_step("S11", "i2s.end");
     auto i2s_cfg = i2s.defaultConfig();
     i2s_cfg.sample_rate = kSampleRate;
     i2s_cfg.channels = 2;
     i2s_cfg.bits_per_sample = 16;
-    i2s_cfg.pin_bck = SYS_I2S_SCLK_PIN;  // GPIO 19
-    i2s_cfg.pin_ws = SYS_I2S_LRCK_PIN;   // GPIO 27
-    i2s_cfg.pin_data = SYS_I2S_DOUT_PIN; // GPIO 2
+    i2s_cfg.pin_bck = SYS_I2S_SCLK_PIN;
+    i2s_cfg.pin_ws = SYS_I2S_LRCK_PIN;
+    i2s_cfg.pin_data = SYS_I2S_DOUT_PIN;
     i2s.begin(i2s_cfg);
-    ESP_LOGI("main", "I2SStream configured: BCK=%d, WS=%d, DATA=%d",
-             SYS_I2S_SCLK_PIN, SYS_I2S_LRCK_PIN, SYS_I2S_DOUT_PIN);
-    startup_step("S12", "i2s.begin");
+    ESP_LOGI("main", "I2SStream pins: BCK=%d WS=%d DATA=%d", SYS_I2S_SCLK_PIN, SYS_I2S_LRCK_PIN, SYS_I2S_DOUT_PIN);
 
     if (s_i2s_writer_task == nullptr) {
         BaseType_t task_ok = xTaskCreatePinnedToCore(i2s_writer_task, "I2SWriter", 4096, nullptr, 2, &s_i2s_writer_task, 1);
@@ -915,6 +914,25 @@ void setup() {
             ESP_LOGE("main", "Failed to start I2S writer task");
         }
     }
+    startup_step("S12", "i2s.begin");
+
+    {
+        uint8_t reg25 = 0x00;
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL3);
+        Wire.endTransmission(false);
+        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
+            reg25 = Wire.read();
+        }
+        reg25 = (reg25 & ~0x02u) | 0x20u;
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL3);
+        Wire.write(reg25);
+        if (Wire.endTransmission() == 0) {
+            ESP_LOGI("main", "ES8388 DACCONTROL3=0x%02X (SoftRamp, unmuted)", reg25);
+        }
+    }
+    startup_step("S13", "DAC_SoftRamp");
 
     // Setup A2DP callbacks
     a2dp_sink.set_on_connection_state_changed(connection_state_callback);
