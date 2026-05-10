@@ -61,10 +61,12 @@ There is no separate product named "Cursor web env setup agent" in the docs; env
 
 ## Known Hardware Notes
 
-- **Module Audio (ES8388) left-channel hiss**: the LOUT1 output on the Module
-  Audio unit currently in use produces audible hiss whenever the DAC is
-  modulating (i.e. any sample is non-zero). ROUT1 is clean. Evidence and the
-  ruling-out of software causes are documented in
-  `docs/Module-Audio-LOUT1-hiss-investigation.md` (Japanese). Treat this as a
-  hardware-side asymmetry of the specific board; do not spend further effort
-  chasing it in firmware unless the investigation document is revisited.
+- **Module Audio (ES8388) left-channel hiss**: On the board investigated,
+  audible hiss was tied to the TRRS MIC path coupling through the mixer while
+  mixer bypass was enabled (a floating MIC line can inject noise). Firmware
+  mitigates this by turning mixer bypass off: ES8388 `DACCONTROL17` and
+  `DACCONTROL20` are programmed in `src/main.cpp` so LI2LO and RI2RO are
+  cleared (no line-in to mixer bypass route). Residual LOUT1 hiss or L/R
+  asymmetry vs ROUT1 may still occur on other Module Audio units or if that
+  routing is changed; see `docs/Module-Audio-LOUT1-hiss-investigation.md`
+  (Japanese) for the original evidence and measurements.
