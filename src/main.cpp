@@ -483,6 +483,8 @@ static bool is_warm_boot_reset_reason(esp_reset_reason_t reason) {
 }
 
 static const uint32_t kWarmBootPreUnmuteDelayMs = 250;
+// Yield after bringing up the I2S writer so DMA has data before DAC unmute.
+static const uint32_t kI2sFeedSettleTicks = pdMS_TO_TICKS(40);
 
 static inline int16_t make_tpdf_dither_sample() {
     uint32_t w = esp_random();
@@ -819,8 +821,8 @@ void setup() {
     }
     startup_step("S04", "AudioI2c");
 
-    // ES8388 init: Pops are avoided by using a local patched Module-Audio (lib/Module-Audio):
-    // init() leaves DAC muted (DACCONTROL3=0x02) and Lout/Rout volume at 0; we unmute after SoftRamp in S07.
+    // ES8388 init: patched Module-Audio (lib/Module-Audio) asserts DAC digital mute in init()
+    // (DACCONTROL3 with SoftRamp + Mute) and volume 0; application unmutes after I2S priming (S07 after S12).
     // Upstream init() does DACPOWER=0x3F then DACCONTROL3=0x00 (unmute), which causes two pops.
     // Upstream setDACmute() is broken (reads ADCCONTROL1, writes DACCONTROL3) — we use direct I2C for DACCONTROL3.
     ESP_LOGI("main", "Initializing ES8388 codec...");
@@ -846,13 +848,8 @@ void setup() {
     es8388.setSampleRate(SAMPLE_RATE_44K);
     startup_step("S06", "DAC_config");
 
-    // DACCONTROL3 (0x19): bit5 = DACSoftRamp, bit1 = DACMute. Set SoftRamp, clear Mute (unmute).
-    if (warm_boot_reset) {
-        // Warm USB resets can re-run setup while analog rails and clocks are still settling.
-        // Keep DAC muted briefly before the first unmute transition to reduce startup pop risk.
-        ESP_LOGI("main", "Warm-boot guard: delay %lu ms before DAC unmute", (unsigned long)kWarmBootPreUnmuteDelayMs);
-        delay(kWarmBootPreUnmuteDelayMs);
-    }
+    // DACCONTROL3 (0x19): bit5 = DACSoftRamp, bit1 = DACMute. Keep muted until I2S is up
+    // so clocks/DMA start do not hit an unmuted DAC (reduces S12 click).
     {
         uint8_t reg25 = 0x00;
         Wire.beginTransmission(ES8388_ADDR);
@@ -861,15 +858,14 @@ void setup() {
         if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
             reg25 = Wire.read();
         }
-        reg25 = (reg25 & ~0x02u) | 0x20u;  // clear Mute (bit1), set SoftRamp (bit5)
+        reg25 = (reg25 | 0x20u) | 0x02u;  // set SoftRamp (bit5), set Mute (bit1)
         Wire.beginTransmission(ES8388_ADDR);
         Wire.write(ES8388_DACCONTROL3);
         Wire.write(reg25);
         if (Wire.endTransmission() == 0) {
-            ESP_LOGI("main", "ES8388 DACCONTROL3=0x%02X (SoftRamp on, unmute)", reg25);
+            ESP_LOGI("main", "ES8388 DACCONTROL3=0x%02X (SoftRamp on, muted until I2S primed)", reg25);
         }
     }
-    startup_step("S07", "DAC_SoftRamp");
 
     // Disable LI2LO / RI2RO analog bypass in the ES8388 output mixer. The Module-Audio
     // driver init() leaves these enabled (DACCONTROL17/20 = 0xD0 => LD2LO=1, LI2LO=1),
@@ -942,14 +938,39 @@ void setup() {
     i2s.begin(i2s_cfg);
     ESP_LOGI("main", "I2SStream configured: BCK=%d, WS=%d, DATA=%d",
              SYS_I2S_SCLK_PIN, SYS_I2S_LRCK_PIN, SYS_I2S_DOUT_PIN);
-    startup_step("S12", "i2s.begin");
-
     if (s_i2s_writer_task == nullptr) {
         BaseType_t task_ok = xTaskCreatePinnedToCore(i2s_writer_task, "I2SWriter", 4096, nullptr, 2, &s_i2s_writer_task, 1);
         if (task_ok != pdPASS) {
             ESP_LOGE("main", "Failed to start I2S writer task");
         }
     }
+    vTaskDelay(kI2sFeedSettleTicks);
+    startup_step("S12", "i2s.begin");
+
+    // Warm USB resets: extra settle before first unmute after I2S is already running.
+    if (warm_boot_reset) {
+        ESP_LOGI("main", "Warm-boot guard: delay %lu ms before DAC unmute", (unsigned long)kWarmBootPreUnmuteDelayMs);
+        delay(kWarmBootPreUnmuteDelayMs);
+    }
+    // DAC digital unmute with soft ramp. Logged as S07 — intentionally after S12 so console
+    // order is S06, S07b, S08…S12, then S07 (ear should follow the same).
+    {
+        uint8_t reg25 = 0x00;
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL3);
+        Wire.endTransmission(false);
+        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
+            reg25 = Wire.read();
+        }
+        reg25 = (reg25 & ~0x02u) | 0x20u;  // clear Mute (bit1), set SoftRamp (bit5)
+        Wire.beginTransmission(ES8388_ADDR);
+        Wire.write(ES8388_DACCONTROL3);
+        Wire.write(reg25);
+        if (Wire.endTransmission() == 0) {
+            ESP_LOGI("main", "ES8388 DACCONTROL3=0x%02X (SoftRamp on, unmute)", reg25);
+        }
+    }
+    startup_step("S07", "DAC_SoftRamp");
 
     // Setup A2DP callbacks
     a2dp_sink.set_on_connection_state_changed(connection_state_callback);
