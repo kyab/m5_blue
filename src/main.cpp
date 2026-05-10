@@ -482,9 +482,16 @@ static bool is_warm_boot_reset_reason(esp_reset_reason_t reason) {
         || reason == ESP_RST_WDT || reason == ESP_RST_INT_WDT;
 }
 
-static const uint32_t kWarmBootPreUnmuteDelayMs = 250;
+// Always wait before first DAC unmute so analog/DMA can settle (warm_boot=0 needs this too).
+static const uint32_t kCodecPreUnmuteDelayMs = 120;
+static const uint32_t kWarmBootExtraPreUnmuteDelayMs = 130;
 // Yield after bringing up the I2S writer so DMA has data before DAC unmute.
-static const uint32_t kI2sFeedSettleTicks = pdMS_TO_TICKS(40);
+static const uint32_t kI2sFeedSettleTicks = pdMS_TO_TICKS(120);
+
+static void pin_module_audio_mclk_gpio0() {
+    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
+    WRITE_PERI_REG(PIN_CTRL, 0xFFF0);
+}
 
 static inline int16_t make_tpdf_dither_sample() {
     uint32_t w = esp_random();
@@ -821,6 +828,16 @@ void setup() {
     }
     startup_step("S04", "AudioI2c");
 
+    // Core2 internal NS4168 uses GPIO0/2/34. Module Audio needs the same pins for MCLK/I2S.
+    // Call end() before any codec init or MCLK so we do not fight the internal speaker driver.
+    ESP_LOGI("main", "M5.Speaker.end (early: free GPIO0/G2/G34 for Module Audio)");
+    M5.Speaker.end();
+    startup_step("S10", "M5.Speaker.end");
+
+    // Slave ES8388 should see stable MCLK before full power/sequence (may reduce S05/S12 clicks).
+    ESP_LOGI("main", "MCLK on GPIO0 (before ES8388 init)");
+    pin_module_audio_mclk_gpio0();
+
     // ES8388 init: patched Module-Audio (lib/Module-Audio) asserts DAC digital mute in init()
     // (DACCONTROL3 with SoftRamp + Mute) and volume 0; application unmutes after I2S priming (S07 after S12).
     // Upstream init() does DACPOWER=0x3F then DACCONTROL3=0x00 (unmute), which causes two pops.
@@ -907,10 +924,9 @@ void setup() {
     }
     startup_step("S07b", "DAC_Mixer_Bypass_Off");
 
-    // Configure MCLK output on GPIO0 (required for ES8388)
-    ESP_LOGI("main", "Configuring MCLK output on GPIO0...");
-    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
-    WRITE_PERI_REG(PIN_CTRL, 0xFFF0);
+    // Configure MCLK output on GPIO0 (required for ES8388; idempotent with early MCLK)
+    ESP_LOGI("main", "Re-assert MCLK output on GPIO0...");
+    pin_module_audio_mclk_gpio0();
     startup_step("S08", "MCLK_GPIO0");
 
     // Initialize ring buffer for delay effect
@@ -918,10 +934,6 @@ void setup() {
     g_ring = new RingBufferInterleaved();
     ESP_LOGI("main", "Ring buffer OK");
     startup_step("S09", "ring_buffer");
-
-    // Disable internal speaker (use Module Audio instead)
-    M5.Speaker.end();
-    startup_step("S10", "M5.Speaker.end");
 
     // Configure I2SStream for Module Audio
     // Must call end() first to clear default config, then reconfigure
@@ -947,10 +959,13 @@ void setup() {
     vTaskDelay(kI2sFeedSettleTicks);
     startup_step("S12", "i2s.begin");
 
-    // Warm USB resets: extra settle before first unmute after I2S is already running.
-    if (warm_boot_reset) {
-        ESP_LOGI("main", "Warm-boot guard: delay %lu ms before DAC unmute", (unsigned long)kWarmBootPreUnmuteDelayMs);
-        delay(kWarmBootPreUnmuteDelayMs);
+    {
+        uint32_t pre_ms = kCodecPreUnmuteDelayMs;
+        if (warm_boot_reset) {
+            pre_ms += kWarmBootExtraPreUnmuteDelayMs;
+        }
+        ESP_LOGI("main", "Pre-unmute settle: %lu ms (warm_boot=%d)", (unsigned long)pre_ms, warm_boot_reset ? 1 : 0);
+        delay(pre_ms);
     }
     // DAC digital unmute with soft ramp. Logged as S07 — intentionally after S12 so console
     // order is S06, S07b, S08…S12, then S07 (ear should follow the same).
