@@ -461,8 +461,18 @@ static void startup_step(const char* step_id, const char* step_name) {
     uint32_t now_us = (uint32_t)micros();
     uint32_t delta_us = (s_prev_startup_step_us == 0) ? 0 : (uint32_t)(now_us - s_prev_startup_step_us);
     s_prev_startup_step_us = now_us;
+    // Human-visible banner first (easy to spot in noisy serial consoles); JSON kept for tooling.
+    Serial.println();
+    Serial.println("##############################################################");
+    Serial.printf(">>> SETUP STEP  %s  |  %s\n", step_id, step_name);
+    Serial.printf(">>> millis=%lu  ts_us=%lu  dt_us=%lu\n", (unsigned long)millis(), (unsigned long)now_us,
+                   (unsigned long)delta_us);
+    Serial.println("##############################################################");
     Serial.printf("{\"ts\":%lu,\"ts_us\":%lu,\"dt_us\":%lu,\"startup_step\":\"%s\",\"name\":\"%s\"}\n",
                   (unsigned long)millis(), (unsigned long)now_us, (unsigned long)delta_us, step_id, step_name);
+    Serial.println();
+    ESP_LOGI("SETUP_STEP", "%s  %s  (millis=%lu dt_us=%lu)", step_id, step_name, (unsigned long)millis(),
+             (unsigned long)delta_us);
     delay(kStartupStepDelayMs);
 }
 // #endregion
