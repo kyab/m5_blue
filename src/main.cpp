@@ -393,12 +393,12 @@ protected:
 // Bluetooth A2DP Sink with I2SStream
 BluetoothA2DPSinkKeepI2S a2dp_sink(a2dp_output);
 
-// Ring buffer for delay effect
+// Ring buffer: delay (red) disabled for now; used by Going-Zero-style Freezer (blue) on g_ring.
 RingBufferInterleaved* g_ring = nullptr;
 
 // Effect control targets written by loop() and consumed by the I2S writer task.
-volatile bool g_effect_blue = false; // Volume reduction
-volatile bool g_effect_red = false;  // Delay effect
+volatile bool g_effect_blue = false; // Freezer (Going-Zero Freeze / Freezer.m)
+volatile bool g_effect_red = false;  // Delay effect (disabled — shares g_ring with Freezer)
 
 // DJ Filter (Going-Zero port): knob-driven LPF/HPF crossover
 static DJFilter g_dj_filter;
@@ -510,11 +510,161 @@ static void add_silence_dither_if_needed(int16_t* data, uint32_t frame_count) {
     }
 }
 
+// Going-Zero Freezer.m / MiniFader.h: FADE_SAMPLE_NUM (~1 ms at 44.1 kHz), DEFAULT_GRAIN_SAMPLE_NUM.
+static const uint32_t kFreezerFadeSamples = 50;
+static const uint32_t kFreezerDefaultGrainSamples = 3000;
+
+static int16_t fz_scale_i16(int16_t s, float rate) {
+    int32_t v = (int32_t)lroundf((float)s * rate);
+    if (v > 32767) v = 32767;
+    else if (v < -32768) v = -32768;
+    return static_cast<int16_t>(v);
+}
+
+// Freezer effect + ring capture (Going-Zero Freezer.m). Call only when g_ring is non-null and input is in `data`.
+static void apply_going_zero_freezer(int16_t* data, uint32_t frame_count) {
+    static bool s_active = false;
+    static bool s_is_fading_out = false;
+    static bool s_is_fading_in = false;
+    static bool s_target_active = false;
+    static uint32_t s_fade_out_ctr = 0;
+    static uint32_t s_fade_in_ctr = 0;
+    static uint32_t s_grain_size = kFreezerDefaultGrainSamples;
+    static uint32_t s_grain_sample_index = 0;
+    static size_t s_grain_start_frame = 0;
+    static uint32_t s_grain_mini_out = 0;
+    static uint32_t s_grain_mini_in = 0;
+
+    const size_t buf_frames = g_ring->getBufferSize();
+    if (buf_frames == 0) return;
+
+    for (uint32_t i = 0; i < frame_count; i++) {
+        uint32_t grain_sz = s_grain_size;
+        if (grain_sz > buf_frames) grain_sz = (uint32_t)buf_frames;
+        if (grain_sz == 0) grain_sz = 1;
+
+        int16_t* sl = &data[i * 2];
+        int16_t* sr = &data[i * 2 + 1];
+        int16_t L = *sl;
+        int16_t R = *sr;
+
+        const bool want = g_effect_blue;
+        if (want != s_active && !s_is_fading_out) {
+            s_target_active = want;
+            s_is_fading_out = true;
+            s_fade_out_ctr = kFreezerFadeSamples;
+        }
+
+        const bool was_fading_out = s_is_fading_out;
+        if (was_fading_out) {
+            if (s_active) {
+                size_t ri = (s_grain_start_frame + s_grain_sample_index) % buf_frames;
+                g_ring->readFrameModulo(ri, &L, &R);
+                uint32_t d = s_grain_sample_index + 1;
+                if (grain_sz - d == kFreezerFadeSamples) s_grain_mini_out = kFreezerFadeSamples;
+                if (grain_sz - d < kFreezerFadeSamples) {
+                    if (s_grain_mini_out > 0) {
+                        float rate = s_grain_mini_out / (float)kFreezerFadeSamples;
+                        L = fz_scale_i16(L, rate);
+                        R = fz_scale_i16(R, rate);
+                        s_grain_mini_out--;
+                    }
+                }
+                s_grain_sample_index++;
+                if (s_grain_sample_index >= grain_sz) {
+                    s_grain_sample_index = 0;
+                    s_grain_mini_in = 0;
+                }
+                if (s_grain_sample_index < kFreezerFadeSamples) {
+                    if (s_grain_mini_in < kFreezerFadeSamples) {
+                        float rate = s_grain_mini_in / (float)kFreezerFadeSamples;
+                        L = fz_scale_i16(L, rate);
+                        R = fz_scale_i16(R, rate);
+                        s_grain_mini_in++;
+                    }
+                }
+            }
+            if (s_fade_out_ctr > 0) {
+                float rate = s_fade_out_ctr / (float)kFreezerFadeSamples;
+                L = fz_scale_i16(L, rate);
+                R = fz_scale_i16(R, rate);
+                s_fade_out_ctr--;
+            }
+            if (s_fade_out_ctr == 0) {
+                s_active = s_target_active;
+                if (s_active) {
+                    uint32_t gsz = s_grain_size;
+                    if (gsz > buf_frames) gsz = (uint32_t)buf_frames;
+                    if (gsz == 0) gsz = 1;
+                    const size_t wp = g_ring->getWritePosition();
+                    s_grain_start_frame = (wp + buf_frames - gsz) % buf_frames;
+                    s_grain_sample_index = 0;
+                    s_grain_mini_in = 0;
+                    s_grain_mini_out = 0;
+                }
+                s_is_fading_out = false;
+                s_is_fading_in = true;
+                s_fade_in_ctr = 0;
+            }
+        }
+
+        if (!was_fading_out) {
+            if (s_active) {
+                size_t ri = (s_grain_start_frame + s_grain_sample_index) % buf_frames;
+                g_ring->readFrameModulo(ri, &L, &R);
+                uint32_t d = s_grain_sample_index + 1;
+                if (grain_sz - d == kFreezerFadeSamples) s_grain_mini_out = kFreezerFadeSamples;
+                if (grain_sz - d < kFreezerFadeSamples) {
+                    if (s_grain_mini_out > 0) {
+                        float rate = s_grain_mini_out / (float)kFreezerFadeSamples;
+                        L = fz_scale_i16(L, rate);
+                        R = fz_scale_i16(R, rate);
+                        s_grain_mini_out--;
+                    }
+                }
+                s_grain_sample_index++;
+                if (s_grain_sample_index >= grain_sz) {
+                    s_grain_sample_index = 0;
+                    s_grain_mini_in = 0;
+                }
+                if (s_grain_sample_index < kFreezerFadeSamples) {
+                    if (s_grain_mini_in < kFreezerFadeSamples) {
+                        float rate = s_grain_mini_in / (float)kFreezerFadeSamples;
+                        L = fz_scale_i16(L, rate);
+                        R = fz_scale_i16(R, rate);
+                        s_grain_mini_in++;
+                    }
+                }
+                if (s_is_fading_in) {
+                    if (s_fade_in_ctr < kFreezerFadeSamples) {
+                        float rate = s_fade_in_ctr / (float)kFreezerFadeSamples;
+                        L = fz_scale_i16(L, rate);
+                        R = fz_scale_i16(R, rate);
+                        s_fade_in_ctr++;
+                        if (s_fade_in_ctr >= kFreezerFadeSamples) s_is_fading_in = false;
+                    }
+                }
+            } else {
+                if (s_is_fading_in) {
+                    if (s_fade_in_ctr < kFreezerFadeSamples) {
+                        float rate = s_fade_in_ctr / (float)kFreezerFadeSamples;
+                        L = fz_scale_i16(L, rate);
+                        R = fz_scale_i16(R, rate);
+                        s_fade_in_ctr++;
+                        if (s_fade_in_ctr >= kFreezerFadeSamples) s_is_fading_in = false;
+                    }
+                }
+            }
+        }
+
+        *sl = L;
+        *sr = R;
+    }
+}
+
 static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool from_bt_pcm) {
-    static bool s_delay_effect_active = false;
     static float s_applied_dj_filter_value = 0.0f;
 
-    bool blue_enabled = g_effect_blue;
     bool red_enabled = g_effect_red;
 
     if (from_bt_pcm) {
@@ -524,34 +674,20 @@ static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool f
             add_silence_dither_if_needed(data, frame_count);
             return;
         }
+        // DUAL_BUTTON_RED delay shares g_ring with Freezer; delay path disabled until split-buffer or mux exists.
+#if 0
+        static bool s_delay_effect_active = false;
         if (g_ring != nullptr && red_enabled && !s_delay_effect_active) {
             g_ring->syncPositon();
             g_ring->advanceReadPosition(-44100); // ~1 second delay
         }
         s_delay_effect_active = red_enabled;
+#endif
+        (void)red_enabled;
 
-        // Apply volume effect
-        if (blue_enabled) {
-            for (uint32_t i = 0; i < frame_count; i++) {
-                int16_t* left = &data[i * 2];
-                int16_t* right = &data[i * 2 + 1];
-                float leftf = *left;
-                float rightf = *right;
-                leftf *= 0.3f;
-                rightf *= 0.3f;
-                *left = static_cast<int16_t>(leftf);
-                *right = static_cast<int16_t>(rightf);
-            }
-        }
-
-        // Apply delay effect using ring buffer
         if (g_ring != nullptr) {
-            if (red_enabled) {
-                g_ring->storeSamples(data, frame_count);
-                g_ring->readSamplesTo(data, frame_count);
-            } else {
-                g_ring->storeSamples(data, frame_count);
-            }
+            g_ring->storeSamples(data, frame_count);
+            apply_going_zero_freezer(data, frame_count);
         }
 
         float target_v = g_dj_filter_target_value;
@@ -582,8 +718,6 @@ static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool f
     if (from_bt_pcm) {
         // Idle-zero prevention: add uncorrelated TPDF dither only for (near-)silent blocks.
         add_silence_dither_if_needed(data, frame_count);
-    } else if (!red_enabled) {
-        s_delay_effect_active = false;
     }
 }
 
@@ -992,9 +1126,9 @@ void loop() {
     bool blue_pressed = (digitalRead(DUAL_BUTTON_BLUE) == LOW);
     bool red_pressed = (digitalRead(DUAL_BUTTON_RED) == LOW);
 
-    // Effect Blue: Volume reduction
+    // Effect Blue: Going-Zero-style Freezer (grain loop on g_ring)
     if (blue_pressed && !g_effect_blue) {
-        ESP_LOGI("main", "Effect Blue ON (Volume 30%%)");
+        ESP_LOGI("main", "Effect Blue ON (Freezer)");
         g_effect_blue = true;
         device.setRGBLED(0, 0x0000FF); // Blue LED
     } else if (!blue_pressed && g_effect_blue) {
@@ -1003,7 +1137,8 @@ void loop() {
         device.setRGBLED(0, 0x00FF00); // Green LED
     }
 
-    // Effect Red: Delay
+#if 0
+    // Effect Red: delay (disabled — shares g_ring with Freezer; see apply_effects_before_i2s)
     if (red_pressed && !g_effect_red) {
         ESP_LOGI("main", "Effect Red ON (Delay)");
         g_effect_red = true;
@@ -1013,6 +1148,8 @@ void loop() {
         g_effect_red = false;
         device.setRGBLED(2, 0x00FF00); // Green LED
     }
+#endif
+    (void)red_pressed;
     control_stats_note_us(s_control_stats.button_us_min, s_control_stats.button_us_max, s_control_stats.button_us_sum, (uint32_t)micros() - section_start_us);
 
     // Rotation angle unit (Grove B): drive DJ filter every loop, log/display at 5 Hz.

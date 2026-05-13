@@ -66,6 +66,20 @@ public:
   
   size_t getBufferSize() const { return _buffer_size; }
 
+  size_t getWritePosition() const { return _write_pos; }
+
+  // Read one stereo frame at frame_index modulo capacity (for Freezer-style grain playback).
+  void readFrameModulo(size_t frame_index, int16_t* out_l, int16_t* out_r) const {
+    if (_buffer == nullptr || _buffer_size == 0) {
+      *out_l = 0;
+      *out_r = 0;
+      return;
+    }
+    size_t idx = frame_index % _buffer_size;
+    *out_l = _buffer[idx * 2];
+    *out_r = _buffer[idx * 2 + 1];
+  }
+
 private:
   int16_t *_buffer = nullptr;
   size_t _buffer_size = 0;
