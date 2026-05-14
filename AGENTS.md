@@ -30,6 +30,13 @@ Triggers that should cause the agent to consult Going-Zero on GitHub:
 - Documentation (README.md etc.): English.
 - Chat responses to the user: Japanese (per user preference).
 
+## Plots and figures
+
+When adding or updating plots, charts, or other data graphics in this repository (for example in notebooks, scripts, or documentation figures):
+
+- **Color**: **Prioritize** a **universal color palette** (universal-design / colorblind-friendly schemes) so series remain distinguishable for readers with color-vision deficiencies. Well-known references include [Paul Tol’s notes](https://personal.sron.nl/~pault/) and the Okabe–Ito palette; match the toolchain you use (e.g. Matplotlib, Plotly) to an explicitly CVD-safe set rather than default rainbow or highly saturated-only schemes.
+- **More than color**: Do not rely on hue alone. Combine color with **line style** (e.g. solid, dashed, or dotted), **line width**, and **marker shape** (or distinct fill patterns where applicable) so each series or category stays identifiable in grayscale print and for low-vision readers.
+
 ## Build / Flash
 
 - Use PlatformIO (`pio`) for building, uploading, and monitoring. See `.agents/skills/pio-workflow/SKILL.md`.
