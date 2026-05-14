@@ -510,9 +510,9 @@ static void add_silence_dither_if_needed(int16_t* data, uint32_t frame_count) {
     }
 }
 
-// Going-Zero Freezer.m / MiniFader.h: FADE_SAMPLE_NUM (~1 ms at 44.1 kHz), DEFAULT_GRAIN_SAMPLE_NUM.
+// Going-Zero Freezer.m / MiniFader.h: FADE_SAMPLE_NUM (~1 ms at 44.1 kHz). Going-Zero default grain is 3000; M5_blue uses 2000 for shorter loop windows.
 static const uint32_t kFreezerFadeSamples = 50;
-static const uint32_t kFreezerDefaultGrainSamples = 3000;
+static const uint32_t kFreezerDefaultGrainSamples = 2000;
 
 static int16_t fz_scale_i16(int16_t s, float rate) {
     int32_t v = (int32_t)lroundf((float)s * rate);
