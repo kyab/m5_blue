@@ -396,7 +396,7 @@ BluetoothA2DPSinkKeepI2S a2dp_sink(a2dp_output);
 // Ring buffer: delay (red) disabled for now; used by Going-Zero-style Freezer (blue) on g_ring.
 RingBufferInterleaved* g_ring = nullptr;
 
-// Effect control targets written by loop() and consumed by the I2S writer task.
+// Effect control targets written by dual_button_poll_task and consumed by the I2S writer task.
 volatile bool g_effect_blue = false; // Freezer (Going-Zero Freeze / Freezer.m)
 volatile bool g_effect_red = false;  // Delay effect (disabled — shares g_ring with Freezer)
 
@@ -431,6 +431,75 @@ enum class DacVolumeCurve {
 
 static DacVolumeCurve s_dac_volume_curve = DacVolumeCurve::Linear;
 static int s_last_applied_dac_volume = -1;
+
+// Dual-button poll + deferred Module-Audio RGB LED (I2C off the hot path).
+static const uint32_t kDualButtonPollMs = 5;
+static const uint32_t kModuleRgbLedDeferMs = 10;
+static TaskHandle_t s_module_led_task = nullptr;
+static volatile uint32_t s_module_led_rgb0 = 0x00FF00;
+static volatile uint32_t s_module_led_rgb2 = 0x00FF00;
+
+static void module_rgb_led_task(void* arg) {
+    (void)arg;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(kModuleRgbLedDeferMs));
+        uint32_t c0 = s_module_led_rgb0;
+        uint32_t c2 = s_module_led_rgb2;
+        device.setRGBLED(0, c0);
+        device.setRGBLED(2, c2);
+    }
+}
+
+static void dual_button_poll_task(void* arg) {
+    (void)arg;
+    bool prev_blue = (digitalRead(DUAL_BUTTON_BLUE) == LOW);
+    g_effect_blue = prev_blue;
+    s_module_led_rgb0 = prev_blue ? 0x0000FF : 0x00FF00;
+    if (s_module_led_task != nullptr) xTaskNotifyGive(s_module_led_task);
+
+    for (;;) {
+        uint32_t section_start_us = (uint32_t)micros();
+
+        bool blue = (digitalRead(DUAL_BUTTON_BLUE) == LOW);
+        bool red = (digitalRead(DUAL_BUTTON_RED) == LOW);
+
+        if (blue != prev_blue) {
+            prev_blue = blue;
+            g_effect_blue = blue;
+            if (blue) {
+                ESP_LOGI("main", "Effect Blue ON (Freezer)");
+                s_module_led_rgb0 = 0x0000FF;
+            } else {
+                ESP_LOGI("main", "Effect Blue OFF");
+                s_module_led_rgb0 = 0x00FF00;
+            }
+            if (s_module_led_task != nullptr) xTaskNotifyGive(s_module_led_task);
+        }
+
+#if 0
+        // Red delay shares g_ring with Freezer; disabled until split-buffer exists.
+        if (red != prev_red) {
+            prev_red = red;
+            g_effect_red = red;
+            if (red) {
+                ESP_LOGI("main", "Effect Red ON (Delay)");
+                s_module_led_rgb2 = 0xFF0000;
+            } else {
+                ESP_LOGI("main", "Effect Red OFF");
+                s_module_led_rgb2 = 0x00FF00;
+            }
+            if (s_module_led_task != nullptr) xTaskNotifyGive(s_module_led_task);
+        }
+#else
+        (void)red;
+#endif
+
+        control_stats_note_us(s_control_stats.button_us_min, s_control_stats.button_us_max, s_control_stats.button_us_sum,
+                              (uint32_t)micros() - section_start_us);
+        vTaskDelay(pdMS_TO_TICKS(kDualButtonPollMs));
+    }
+}
 
 static void update_bt_status_display() {
     if (!g_bt_state_display_dirty) return;
@@ -938,6 +1007,14 @@ void setup() {
     }
     startup_step("S04", "AudioI2c");
 
+    // Button sampling at fixed interval; RGB LED updates deferred on a lower-priority task (I2C).
+    if (xTaskCreatePinnedToCore(module_rgb_led_task, "ModRgbLed", 3072, nullptr, 3, &s_module_led_task, 0) != pdPASS) {
+        ESP_LOGE("main", "Failed to create ModRgbLed task");
+    }
+    if (xTaskCreatePinnedToCore(dual_button_poll_task, "DualBtn", 3072, nullptr, 6, nullptr, 0) != pdPASS) {
+        ESP_LOGE("main", "Failed to create DualBtn task");
+    }
+
     // Core2 onboard speaker/analog pins overlap Module Audio MCLK/I2S; release driver first.
     M5.Speaker.end();
     startup_step("S05", "M5.Speaker.end");
@@ -1120,37 +1197,6 @@ void loop() {
     control_stats_note_us(s_control_stats.m5_update_us_min, s_control_stats.m5_update_us_max, s_control_stats.m5_update_us_sum, (uint32_t)micros() - section_start_us);
     update_bt_status_display();
     apply_host_volume_to_dac_if_needed();
-
-    section_start_us = (uint32_t)micros();
-    // Read dual button states
-    bool blue_pressed = (digitalRead(DUAL_BUTTON_BLUE) == LOW);
-    bool red_pressed = (digitalRead(DUAL_BUTTON_RED) == LOW);
-
-    // Effect Blue: Going-Zero-style Freezer (grain loop on g_ring)
-    if (blue_pressed && !g_effect_blue) {
-        ESP_LOGI("main", "Effect Blue ON (Freezer)");
-        g_effect_blue = true;
-        device.setRGBLED(0, 0x0000FF); // Blue LED
-    } else if (!blue_pressed && g_effect_blue) {
-        ESP_LOGI("main", "Effect Blue OFF");
-        g_effect_blue = false;
-        device.setRGBLED(0, 0x00FF00); // Green LED
-    }
-
-#if 0
-    // Effect Red: delay (disabled — shares g_ring with Freezer; see apply_effects_before_i2s)
-    if (red_pressed && !g_effect_red) {
-        ESP_LOGI("main", "Effect Red ON (Delay)");
-        g_effect_red = true;
-        device.setRGBLED(2, 0xFF0000); // Red LED
-    } else if (!red_pressed && g_effect_red) {
-        ESP_LOGI("main", "Effect Red OFF");
-        g_effect_red = false;
-        device.setRGBLED(2, 0x00FF00); // Green LED
-    }
-#endif
-    (void)red_pressed;
-    control_stats_note_us(s_control_stats.button_us_min, s_control_stats.button_us_max, s_control_stats.button_us_sum, (uint32_t)micros() - section_start_us);
 
     // Rotation angle unit (Grove B): drive DJ filter every loop, log/display at 5 Hz.
     // ESP32 ADC on GPIO36 is inherently noisy; apply (A) 16x oversampling + (B) EMA low-pass
