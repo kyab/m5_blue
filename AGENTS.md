@@ -14,7 +14,6 @@ How to reference:
 
 - Prefer fetching the specific file from the Going-Zero repository on GitHub (raw URL via `WebFetch`, or the GitHub MCP) before writing or modifying related code in this repo.
 - When porting, keep behavior aligned with the reference implementation (coefficients, formulas, constants, parameter mappings, state machines, fade/anti-click handling, etc.).
-- If a deliberate divergence from Going-Zero is introduced (e.g. for M5Stack constraints), note the reason in a code comment near the change and in the commit message.
 
 Triggers that should cause the agent to consult Going-Zero on GitHub:
 
