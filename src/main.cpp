@@ -7,6 +7,7 @@
 #include "BluetoothA2DPSink.h"
 #include "RingBuffer.hpp"
 #include "DJFilter.hpp"
+#include "bpm/streaming_bpm_analyzer.hpp"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -406,6 +407,8 @@ static volatile float g_dj_filter_target_value = 0.0f;
 // Scratch buffers for int16<->float deinterleave in the I2S writer task.
 static float s_dj_left[kI2SWriterFrames];
 static float s_dj_right[kI2SWriterFrames];
+
+static bpm::StreamingBpmAnalyzer g_streaming_bpm;
 
 // When the A2DP source sends long runs of digital silence (pause, track gap, app mute),
 // some DAC paths treat "all zero" PCM as an idle state and create audible clicks at
@@ -873,8 +876,10 @@ static void i2s_writer_task(void* arg) {
 
 // Audio callback - keep Bluetooth ingress lightweight; effects run immediately before I2S writes.
 void audio_callback(int16_t* data, uint32_t sample_num) {
-    (void)data;
     stats_note_callback(sample_num);
+    if (data != nullptr && sample_num >= 2 && (sample_num & 1u) == 0) {
+        g_streaming_bpm.enqueueStereoInterleaved(data, sample_num);
+    }
 
     static bool first_call = true;
     if (first_call) {
@@ -921,6 +926,7 @@ void a2dp_audio_state_callback(esp_a2d_audio_state_t state, void* obj) {
     stats_reset_callback_gap();
     if (state != ESP_A2D_AUDIO_STATE_STARTED) {
         bt_pcm_ring_clear();
+        g_streaming_bpm.reset();
     }
 }
 
@@ -1153,6 +1159,7 @@ void setup() {
             ESP_LOGE("main", "Failed to start I2S writer task");
         }
     }
+    bpm::start_bpm_worker_task(&g_streaming_bpm);
     startup_step("S12", "i2s.begin");
 
     {
@@ -1224,6 +1231,22 @@ void loop() {
     M5.update();
     control_stats_note_us(s_control_stats.m5_update_us_min, s_control_stats.m5_update_us_max, s_control_stats.m5_update_us_sum, (uint32_t)micros() - section_start_us);
     update_bt_status_display();
+    {
+        static uint32_t s_bpm_ui_ms = 0;
+        uint32_t now_ms = (uint32_t)millis();
+        if (now_ms - s_bpm_ui_ms >= 200) {
+            s_bpm_ui_ms = now_ms;
+            M5.Display.fillRect(0, 140, 320, 28, BLACK);
+            M5.Display.setCursor(0, 140);
+            M5.Display.setTextColor(CYAN);
+            float b = g_streaming_bpm.bpm();
+            if (b < 1.0f) {
+                M5.Display.print("BPM: ---");
+            } else {
+                M5.Display.printf("BPM: %.2f", (double)b);
+            }
+        }
+    }
     apply_host_volume_to_dac_if_needed();
 
     // Rotation angle unit (Grove B): drive DJ filter every loop, log/display at 5 Hz.
