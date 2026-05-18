@@ -62,7 +62,6 @@ static const size_t kI2SWriterBytes = kI2SWriterFrames * kStereoChannels * sizeo
 static const size_t kBtPcmRingBytes = 32768;        // ~186 ms stereo 16-bit queue; absorbs A2DP burst jitter
 static const size_t kBtPcmPrebufferBytes = 24576;   // ~139 ms: resume into the stable high-water region
 static const uint32_t kBtPcmPushWaitMs = 20;        // Restore bounded back-pressure before dropping PCM
-static const uint32_t kPeriodicBtAudioLogMs = 10000; // audio_stats, audio_callback, control_stats serial rate limit
 static uint8_t s_bt_pcm_ring[kBtPcmRingBytes];
 static size_t s_bt_pcm_head = 0;
 static size_t s_bt_pcm_tail = 0;
@@ -74,9 +73,6 @@ static_assert(sizeof(s_i2s_writer_bytes) == kI2SWriterBytes, "I2S writer buffer 
 
 extern volatile esp_a2d_audio_state_t g_a2dp_audio_state;
 static size_t bt_pcm_ring_used();
-
-static void agent_debug_ndjson(const char* hypothesis_id, const char* location, const char* message,
-                               const char* data_json);
 
 static inline size_t frame_align_bytes(size_t bytes) {
     return bytes & ~(size_t)(2 * sizeof(int16_t) - 1);
@@ -141,12 +137,6 @@ static void stats_note_ring_drop(size_t bytes) {
     s_audio_stats.ring_drop_count++;
     s_audio_stats.ring_drop_bytes += bytes_u32;
     portEXIT_CRITICAL(&s_audio_stats_mux);
-
-    char data[112];
-    size_t ring_now = bt_pcm_ring_used();
-    snprintf(data, sizeof(data), "{\"dropped_bytes\":%lu,\"ring_used_now\":%u}",
-             (unsigned long)bytes_u32, (unsigned)(ring_now > UINT32_MAX ? UINT32_MAX : (uint32_t)ring_now));
-    agent_debug_ndjson("H3", "main.cpp:stats_note_ring_drop", "BT_PCM_RING_DROP", data);
 }
 
 static void stats_note_writer(bool pcm_block, bool rebuffered, uint32_t write_us) {
@@ -204,7 +194,7 @@ static inline void control_stats_note_us(uint32_t& min_v, uint32_t& max_v, uint3
 static void dump_control_stats_if_due() {
     static uint32_t s_last_dump_ms = 0;
     uint32_t now_ms = (uint32_t)millis();
-    if (now_ms - s_last_dump_ms < kPeriodicBtAudioLogMs) return;
+    if (now_ms - s_last_dump_ms < 1000) return;
     s_last_dump_ms = now_ms;
 
     ControlLoopStats stats = s_control_stats;
@@ -250,7 +240,7 @@ static void dump_control_stats_if_due() {
 static void dump_audio_stats_if_due() {
     static uint32_t s_last_dump_ms = 0;
     uint32_t now_ms = (uint32_t)millis();
-    if (now_ms - s_last_dump_ms < kPeriodicBtAudioLogMs) return;
+    if (now_ms - s_last_dump_ms < 1000) return;
     s_last_dump_ms = now_ms;
 
     AudioStats stats;
@@ -522,43 +512,6 @@ static void update_bt_status_display() {
     M5.Display.printf("BT: %s", state_str[state]);
 }
 
-// #region agent log
-// NDJSON session capture (tee Serial to .cursor/debug-8c43f1.log on host). ESP32 cannot open host paths.
-static void agent_debug_ndjson(const char* hypothesis_id, const char* location, const char* message,
-                               const char* data_json) {
-    Serial.printf(
-        "{\"sessionId\":\"8c43f1\",\"timestamp\":%lu,\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\","
-        "\"data\":%s}\n",
-        (unsigned long)millis(), hypothesis_id, location, message, data_json ? data_json : "{}");
-}
-
-static void debug_log_line(const char* hid, const char* msg, const char* data, int line) {
-    char loc[32];
-    snprintf(loc, sizeof(loc), "main.cpp:%d", line);
-    agent_debug_ndjson(hid, loc, msg, data);
-}
-#define DEBUG_LOG(hid, msg, data) debug_log_line(hid, msg, data, __LINE__)
-
-static void avrc_debug_playstatus(esp_avrc_playback_stat_t playback) {
-    char data[96];
-    snprintf(data, sizeof(data), "{\"playback\":%d,\"a2dp_audio_state\":%d}", (int)playback, (int)g_a2dp_audio_state);
-    agent_debug_ndjson("H1", "main.cpp:avrc_playstatus", "AVRCP_PLAYSTATUS", data);
-}
-
-static void avrc_debug_play_pos(uint32_t play_pos_ms) {
-    char data[112];
-    snprintf(data, sizeof(data), "{\"play_pos_ms\":%lu,\"a2dp_audio_state\":%d}",
-             (unsigned long)play_pos_ms, (int)g_a2dp_audio_state);
-    agent_debug_ndjson("H1", "main.cpp:avrc_play_pos", "AVRCP_PLAY_POS", data);
-}
-
-static void avrc_debug_track_change(uint8_t* elm_id) {
-    unsigned b0 = elm_id ? (unsigned)elm_id[0] : 0u;
-    char data[80];
-    snprintf(data, sizeof(data), "{\"elm_id_b0\":%u,\"a2dp_audio_state\":%d}", b0, (int)g_a2dp_audio_state);
-    agent_debug_ndjson("H1", "main.cpp:avrc_track_change", "AVRCP_TRACK_CHANGE", data);
-}
-
 // Startup step trace: default no delay (-DSTARTUP_STEP_DELAY_MS to override).
 #ifndef STARTUP_STEP_DELAY_MS
 #define STARTUP_STEP_DELAY_MS 0
@@ -576,7 +529,6 @@ static void startup_step(const char* step_id, const char* step_name) {
     ESP_LOGI("SETUP_STEP", "%s  %s", step_id, step_name);
     delay(kStartupStepDelayMs);
 }
-// #endregion
 
 static void pin_module_audio_mclk_gpio0() {
     PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
@@ -838,13 +790,10 @@ static void i2s_writer_task(void* arg) {
     static bool s_bt_boundary_valid = false;
     static int16_t s_bt_prev_tail_L = 0;
     static int16_t s_bt_prev_tail_R = 0;
-    static uint32_t s_bt_boundary_last_log_ms = 0;
-    static uint32_t s_bt_boundary_last_warn_log_ms = 0;
-    // Compares consecutive PCM samples split across I2S blocks (last frame vs next first frame).
-    // High-frequency / transient-heavy music can exceed moderate thresholds without any host glitch.
-    // Values near Nyquist can approach ~65535 peak-to-peak per adjacent pair at full scale.
-    static const int32_t kDbgBtBoundaryDeltaThreshold = 28000;
-    static const uint32_t kDbgBtBoundaryLogMinMs = 150;
+    // Adjacent PCM at I2S block splits should be continuous; a large jump often indicates a host
+    // stream discontinuity (e.g. seek). Loud HF content can also produce large steps; threshold
+    // is set conservatively high to balance false positives vs. audible clicks from Safari/macOS.
+    static const int32_t kBtBoundaryDeltaThreshold = 28000;
     static const uint32_t kBtBoundaryRepairFrames = 48;
     ESP_LOGI("i2s_writer", "task started: block=%u bytes frames=%lu", (unsigned)block_bytes, (unsigned long)block_frames);
     for (;;) {
@@ -887,8 +836,7 @@ static void i2s_writer_task(void* arg) {
                     if (dL < 0) dL = -dL;
                     if (dR < 0) dR = -dR;
                     const int32_t mx = (dL > dR) ? dL : dR;
-                    const int32_t warn_min_delta = kDbgBtBoundaryDeltaThreshold / 2; // log-only band [half, threshold)
-                    if (mx >= kDbgBtBoundaryDeltaThreshold) {
+                    if (mx >= kBtBoundaryDeltaThreshold) {
                         const uint32_t nrep =
                             (block_frames < kBtBoundaryRepairFrames) ? block_frames : kBtBoundaryRepairFrames;
                         for (uint32_t fi = 0; fi < nrep; fi++) {
@@ -904,28 +852,6 @@ static void i2s_writer_task(void* arg) {
                             else if (ir < -32768) ir = -32768;
                             pcm[fi * kStereoChannels] = static_cast<int16_t>(il);
                             pcm[fi * kStereoChannels + 1U] = static_cast<int16_t>(ir);
-                        }
-                        uint32_t ms = (uint32_t)millis();
-                        if (ms - s_bt_boundary_last_log_ms >= kDbgBtBoundaryLogMinMs) {
-                            s_bt_boundary_last_log_ms = ms;
-                            char data[180];
-                            snprintf(data, sizeof(data),
-                                     "{\"max_delta\":%ld,\"repair_frames\":%u,\"a2dp_audio_state\":%d}",
-                                     (long)mx, (unsigned)nrep, (int)g_a2dp_audio_state);
-                            agent_debug_ndjson("H2", "main.cpp:i2s_bt_boundary", "PCM_BLOCK_BOUNDARY_REPAIRED",
-                                               data);
-                        }
-                    } else if (mx >= warn_min_delta) {
-                        uint32_t ms_w = (uint32_t)millis();
-                        if (ms_w - s_bt_boundary_last_warn_log_ms >= kDbgBtBoundaryLogMinMs) {
-                            s_bt_boundary_last_warn_log_ms = ms_w;
-                            char data[200];
-                            snprintf(data, sizeof(data),
-                                     "{\"max_delta\":%ld,\"warn_min_delta\":%ld,\"repair_threshold\":%ld,"
-                                     "\"a2dp_audio_state\":%d}",
-                                     (long)mx, (long)warn_min_delta, (long)kDbgBtBoundaryDeltaThreshold,
-                                     (int)g_a2dp_audio_state);
-                            agent_debug_ndjson("H2", "main.cpp:i2s_bt_boundary", "PCM_BLOCK_BOUNDARY_WARN", data);
                         }
                     }
                 }
@@ -956,10 +882,10 @@ void audio_callback(int16_t* data, uint32_t sample_num) {
         first_call = false;
     }
 
-    static uint32_t s_last_audio_cb_log_ms = 0;
-    uint32_t now_ms = (uint32_t)millis();
-    if (now_ms - s_last_audio_cb_log_ms >= kPeriodicBtAudioLogMs) {
-        s_last_audio_cb_log_ms = now_ms;
+    static uint32_t processed_samples = 0;
+    processed_samples += sample_num;
+    if (processed_samples >= 44100) {
+        processed_samples = 0;
         ESP_LOGI("audio", "audio_callback");
     }
 }
@@ -989,19 +915,14 @@ void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
 
 }
 
-// #region agent log
-void audio_state_callback_debug(esp_a2d_audio_state_t state, void* obj) {
+void a2dp_audio_state_callback(esp_a2d_audio_state_t state, void* obj) {
     (void)obj;
     g_a2dp_audio_state = state;
     stats_reset_callback_gap();
     if (state != ESP_A2D_AUDIO_STATE_STARTED) {
         bt_pcm_ring_clear();
     }
-    static char s_dbg[48];
-    snprintf(s_dbg, sizeof(s_dbg), "{\"state\":%d}", (int)state);
-    DEBUG_LOG("H4", "a2dp_audio_state", s_dbg);
 }
-// #endregion
 
 static int map_host_volume_to_dac(int host_volume_127) {
     if (host_volume_127 <= 0) return 0;
@@ -1254,13 +1175,9 @@ void setup() {
 
     // Setup A2DP callbacks
     a2dp_sink.set_on_connection_state_changed(connection_state_callback);
-    a2dp_sink.set_on_audio_state_changed(audio_state_callback_debug, nullptr);
+    a2dp_sink.set_on_audio_state_changed(a2dp_audio_state_callback, nullptr);
     a2dp_sink.set_digital_volume_control(false);
     a2dp_sink.set_on_volumechange(handle_host_volume_change);
-    a2dp_sink.set_avrc_rn_playstatus_callback(avrc_debug_playstatus);
-    // Minimum interval is 1 s per ESP32-A2DP (notification register parameter).
-    a2dp_sink.set_avrc_rn_play_pos_callback(avrc_debug_play_pos, 1);
-    a2dp_sink.set_avrc_rn_track_change_callback(avrc_debug_track_change);
 
     // Keep Bluetooth ingress lightweight; effects are applied in the I2S writer task.
     a2dp_sink.set_raw_stream_reader_writer(audio_callback);
