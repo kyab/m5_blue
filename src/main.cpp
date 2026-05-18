@@ -512,13 +512,6 @@ static void update_bt_status_display() {
     M5.Display.printf("BT: %s", state_str[state]);
 }
 
-// #region agent log
-static void debug_log(const char* hid, const char* msg, const char* data, int line) {
-    Serial.printf("{\"ts\":%lu,\"hypothesisId\":\"%s\",\"message\":\"%s\",\"data\":%s,\"location\":\"main.cpp:%d\"}\n",
-                  (unsigned long)millis(), hid, msg, data ? data : "{}", line);
-}
-#define DEBUG_LOG(hid, msg, data) debug_log(hid, msg, data, __LINE__)
-
 // Startup step trace: default no delay (-DSTARTUP_STEP_DELAY_MS to override).
 #ifndef STARTUP_STEP_DELAY_MS
 #define STARTUP_STEP_DELAY_MS 0
@@ -536,7 +529,6 @@ static void startup_step(const char* step_id, const char* step_name) {
     ESP_LOGI("SETUP_STEP", "%s  %s", step_id, step_name);
     delay(kStartupStepDelayMs);
 }
-// #endregion
 
 static void pin_module_audio_mclk_gpio0() {
     PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
@@ -795,6 +787,14 @@ static void i2s_writer_task(void* arg) {
     const size_t block_bytes = sizeof(s_i2s_writer_bytes);
     const uint32_t block_frames = block_bytes / (kStereoChannels * sizeof(int16_t));
     bool draining_bt_pcm = false;
+    static bool s_bt_boundary_valid = false;
+    static int16_t s_bt_prev_tail_L = 0;
+    static int16_t s_bt_prev_tail_R = 0;
+    // Adjacent PCM at I2S block splits should be continuous; a large jump often indicates a host
+    // stream discontinuity (e.g. seek). Loud HF content can also produce large steps; threshold
+    // is set conservatively high to balance false positives vs. audible clicks from Safari/macOS.
+    static const int32_t kBtBoundaryDeltaThreshold = 28000;
+    static const uint32_t kBtBoundaryRepairFrames = 48;
     ESP_LOGI("i2s_writer", "task started: block=%u bytes frames=%lu", (unsigned)block_bytes, (unsigned long)block_frames);
     for (;;) {
         bool write_bt_pcm = false;
@@ -825,9 +825,42 @@ static void i2s_writer_task(void* arg) {
                 draining_bt_pcm = false;
                 write_bt_pcm = false;
                 rebuffered = true;
+                s_bt_boundary_valid = false;
                 fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
+            } else {
+                int16_t* pcm = reinterpret_cast<int16_t*>(s_i2s_writer_bytes);
+                const uint32_t last_frame_idx = (block_frames - 1U) * kStereoChannels;
+                if (s_bt_boundary_valid) {
+                    int32_t dL = (int32_t)pcm[0] - (int32_t)s_bt_prev_tail_L;
+                    int32_t dR = (int32_t)pcm[1] - (int32_t)s_bt_prev_tail_R;
+                    if (dL < 0) dL = -dL;
+                    if (dR < 0) dR = -dR;
+                    const int32_t mx = (dL > dR) ? dL : dR;
+                    if (mx >= kBtBoundaryDeltaThreshold) {
+                        const uint32_t nrep =
+                            (block_frames < kBtBoundaryRepairFrames) ? block_frames : kBtBoundaryRepairFrames;
+                        for (uint32_t fi = 0; fi < nrep; fi++) {
+                            float t = (float)(fi + 1U) / (float)nrep;
+                            float fl = (1.0f - t) * (float)s_bt_prev_tail_L + t * (float)pcm[fi * kStereoChannels];
+                            float fr =
+                                (1.0f - t) * (float)s_bt_prev_tail_R + t * (float)pcm[fi * kStereoChannels + 1U];
+                            int32_t il = (int32_t)lroundf(fl);
+                            int32_t ir = (int32_t)lroundf(fr);
+                            if (il > 32767) il = 32767;
+                            else if (il < -32768) il = -32768;
+                            if (ir > 32767) ir = 32767;
+                            else if (ir < -32768) ir = -32768;
+                            pcm[fi * kStereoChannels] = static_cast<int16_t>(il);
+                            pcm[fi * kStereoChannels + 1U] = static_cast<int16_t>(ir);
+                        }
+                    }
+                }
+                s_bt_prev_tail_L = pcm[last_frame_idx];
+                s_bt_prev_tail_R = pcm[last_frame_idx + 1U];
+                s_bt_boundary_valid = true;
             }
         } else {
+            s_bt_boundary_valid = false;
             fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
         }
         apply_effects_before_i2s(reinterpret_cast<int16_t*>(s_i2s_writer_bytes), block_frames, write_bt_pcm);
@@ -882,19 +915,14 @@ void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
 
 }
 
-// #region agent log
-void audio_state_callback_debug(esp_a2d_audio_state_t state, void* obj) {
+void a2dp_audio_state_callback(esp_a2d_audio_state_t state, void* obj) {
     (void)obj;
     g_a2dp_audio_state = state;
     stats_reset_callback_gap();
     if (state != ESP_A2D_AUDIO_STATE_STARTED) {
         bt_pcm_ring_clear();
     }
-    static char s_dbg[48];
-    snprintf(s_dbg, sizeof(s_dbg), "{\"state\":%d}", (int)state);
-    DEBUG_LOG("H5", "a2dp_audio_state", s_dbg);
 }
-// #endregion
 
 static int map_host_volume_to_dac(int host_volume_127) {
     if (host_volume_127 <= 0) return 0;
@@ -1147,7 +1175,7 @@ void setup() {
 
     // Setup A2DP callbacks
     a2dp_sink.set_on_connection_state_changed(connection_state_callback);
-    a2dp_sink.set_on_audio_state_changed(audio_state_callback_debug, nullptr);
+    a2dp_sink.set_on_audio_state_changed(a2dp_audio_state_callback, nullptr);
     a2dp_sink.set_digital_volume_control(false);
     a2dp_sink.set_on_volumechange(handle_host_volume_change);
 
