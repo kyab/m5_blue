@@ -29,6 +29,13 @@ Triggers that should cause the agent to consult Going-Zero on GitHub:
 - Documentation (README.md etc.): English.
 - Chat responses to the user: Japanese (per user preference).
 
+## Pull requests
+
+When creating or updating pull requests for this repository (for example with `gh pr create` or `gh pr edit`):
+
+- Write the **title and description/body in English**, consistent with README and other published documentation here.
+- Keep the description as simple or detailed as the change requires; language stays English unless a maintainer explicitly chooses otherwise.
+
 ## Plots and figures
 
 When adding or updating plots, charts, or other data graphics in this repository (for example in notebooks, scripts, or documentation figures):
