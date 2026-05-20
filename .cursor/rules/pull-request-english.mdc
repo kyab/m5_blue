@@ -1,0 +1,8 @@
+---
+description: GitHub PR titles and bodies must be English for this repository
+alwaysApply: true
+---
+
+# Pull request language
+
+When drafting or revising **GitHub pull request titles and bodies** for this project, use **English**. See **`AGENTS.md` → Pull requests** for the canonical wording.
