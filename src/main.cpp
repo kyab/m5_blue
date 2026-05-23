@@ -5,6 +5,8 @@
 #include "es8388.hpp"
 #include "AudioTools.h"
 #include "BluetoothA2DPSink.h"
+#include "esp_gap_bt_api.h"
+#include "esp_idf_version.h"
 #include "RingBuffer.hpp"
 #include "DJFilter.hpp"
 #include "esp_random.h"
@@ -240,7 +242,7 @@ static void dump_control_stats_if_due() {
 static void dump_audio_stats_if_due() {
     static uint32_t s_last_dump_ms = 0;
     uint32_t now_ms = (uint32_t)millis();
-    if (now_ms - s_last_dump_ms < 1000) return;
+    if (now_ms - s_last_dump_ms < 10000) return;
     s_last_dump_ms = now_ms;
 
     AudioStats stats;
@@ -376,6 +378,8 @@ public:
 static BluetoothA2DPOutputQueuedI2S a2dp_output;
 
 class BluetoothA2DPSinkKeepI2S : public BluetoothA2DPSink {
+    // Subclass kept for I2S keepalive only. Multi-host A2DP takeover was attempted but reverted
+    // (stack/library constraints); revisit with serial BT_AV logging and a minimal repro branch.
 public:
     using BluetoothA2DPSink::BluetoothA2DPSink;
 
@@ -390,8 +394,119 @@ protected:
     }
 };
 
-// Bluetooth A2DP Sink with I2SStream
-BluetoothA2DPSinkKeepI2S a2dp_sink(a2dp_output);
+static bool s_diag_logged_first_connected = false;
+static bool s_diag_have_last_connected_peer_bda = false;
+static esp_bd_addr_t s_diag_last_connected_peer_bda{};
+
+static const char* diag_a2dp_disc_reason_str(esp_a2d_disc_rsn_t r) {
+    switch (r) {
+        case ESP_A2D_DISC_RSN_NORMAL:
+            return "NORMAL";
+        case ESP_A2D_DISC_RSN_ABNORMAL:
+            return "ABNORMAL";
+        default:
+            return "?";
+    }
+}
+
+static void diag_bt_avrcp_connection_cb(bool connected) {
+    ESP_LOGI("BT_DIAG", "event=avrcp_transport connected=%d millis=%lu", (int)connected, (unsigned long)millis());
+}
+
+// BT_DIAG correlates Classic BT GAP + A2DP (grep BT_DIAG during pairing / takeover debug).
+class BluetoothA2DPSinkDiag : public BluetoothA2DPSinkKeepI2S {
+public:
+    using BluetoothA2DPSinkKeepI2S::BluetoothA2DPSinkKeepI2S;
+
+protected:
+    void handle_connection_state(uint16_t event, void* p_param) override {
+        esp_a2d_cb_param_t* a2d = static_cast<esp_a2d_cb_param_t*>(p_param);
+        const esp_a2d_connection_state_t incoming = a2d->conn_stat.state;
+        const esp_a2d_connection_state_t prior_sink = connection_state;
+        esp_bd_addr_t remote{};
+        memcpy(remote, a2d->conn_stat.remote_bda, ESP_BD_ADDR_LEN);
+
+        switch (incoming) {
+            case ESP_A2D_CONNECTION_STATE_CONNECTING:
+                ESP_LOGI("BT_DIAG", "event=a2dp_connecting millis=%lu peer=%s prior_sink_state=%d",
+                         (unsigned long)millis(), to_str(remote), (int)prior_sink);
+                break;
+            case ESP_A2D_CONNECTION_STATE_CONNECTED:
+                if (!s_diag_logged_first_connected) {
+                    ESP_LOGI("BT_DIAG", "event=a2dp_connected_after_boot millis=%lu peer=%s",
+                             (unsigned long)millis(), to_str(remote));
+                    s_diag_logged_first_connected = true;
+                }
+                if (s_diag_have_last_connected_peer_bda &&
+                    memcmp(remote, s_diag_last_connected_peer_bda, ESP_BD_ADDR_LEN) != 0) {
+                    ESP_LOGI("BT_DIAG", "event=a2dp_connected_other_host prev_peer=%s",
+                             to_str(s_diag_last_connected_peer_bda));
+                    ESP_LOGI("BT_DIAG", "event=a2dp_connected_other_host new_peer=%s", to_str(remote));
+                }
+                memcpy(s_diag_last_connected_peer_bda, remote, ESP_BD_ADDR_LEN);
+                s_diag_have_last_connected_peer_bda = true;
+                ESP_LOGI("BT_DIAG", "event=a2dp_sink_connected millis=%lu peer=%s", (unsigned long)millis(),
+                         to_str(remote));
+                break;
+            case ESP_A2D_CONNECTION_STATE_DISCONNECTING:
+                if (prior_sink == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+                    ESP_LOGI("BT_DIAG",
+                             "event=a2dp_disconnecting_from_active_host millis=%lu peer=%s prior_sink=%d",
+                             (unsigned long)millis(), to_str(remote), (int)prior_sink);
+                }
+                break;
+            case ESP_A2D_CONNECTION_STATE_DISCONNECTED:
+                ESP_LOGI("BT_DIAG",
+                         "event=a2dp_disconnected_from_host millis=%lu peer=%s disc_rsn=%s prior_sink=%d",
+                         (unsigned long)millis(), to_str(remote), diag_a2dp_disc_reason_str(a2d->conn_stat.disc_rsn),
+                         (int)prior_sink);
+                break;
+            default:
+                break;
+        }
+
+        BluetoothA2DPSink::handle_connection_state(event, p_param);
+    }
+
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 0, 0)
+    void app_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t* param) override {
+        if (param != nullptr) {
+            switch (event) {
+                case ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT:
+                    ESP_LOGI("BT_DIAG", "event=gap_acl_connected stat=%d millis=%lu peer=%s",
+                             (int)param->acl_conn_cmpl_stat.stat, (unsigned long)millis(),
+                             to_str(param->acl_conn_cmpl_stat.bda));
+                    break;
+                case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
+                    ESP_LOGI("BT_DIAG", "event=gap_acl_disconnected reason=0x%02x millis=%lu peer=%s",
+                             (unsigned)param->acl_disconn_cmpl_stat.reason, (unsigned long)millis(),
+                             to_str(param->acl_disconn_cmpl_stat.bda));
+                    break;
+                case ESP_BT_GAP_AUTH_CMPL_EVT:
+                    ESP_LOGI("BT_DIAG",
+                             "event=gap_auth_cmpl millis=%lu peer=%s ok=%d name=%s",
+                             (unsigned long)millis(), to_str(param->auth_cmpl.bda),
+                             (int)(param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS), param->auth_cmpl.device_name);
+                    break;
+                case ESP_BT_GAP_CFM_REQ_EVT:
+                    ESP_LOGI("BT_DIAG", "event=gap_ssp_confirm millis=%lu peer=%s numeric=%lu",
+                             (unsigned long)millis(), to_str(param->cfm_req.bda),
+                             (unsigned long)param->cfm_req.num_val);
+                    break;
+                case ESP_BT_GAP_PIN_REQ_EVT:
+                    ESP_LOGI("BT_DIAG", "event=gap_pin_req millis=%lu peer=%s", (unsigned long)millis(),
+                             to_str(param->pin_req.bda));
+                    break;
+                default:
+                    break;
+            }
+        }
+        BluetoothA2DPSink::app_gap_callback(event, param);
+    }
+#endif
+};
+
+BluetoothA2DPSinkDiag a2dp_sink(a2dp_output);
 
 // Ring buffer: delay (red) disabled for now; used by Going-Zero-style Freezer (blue) on g_ring.
 RingBufferInterleaved* g_ring = nullptr;
@@ -882,18 +997,12 @@ void audio_callback(int16_t* data, uint32_t sample_num) {
         first_call = false;
     }
 
-    static uint32_t processed_samples = 0;
-    processed_samples += sample_num;
-    if (processed_samples >= 44100) {
-        processed_samples = 0;
-        ESP_LOGI("audio", "audio_callback");
-    }
 }
 
 // Connection state callback
 void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
     const char* state_str[] = {"Disconnected", "Connecting", "Connected", "Disconnecting"};
-    ESP_LOGI("a2dp", "Connection state: %s", state_str[state]);
+    ESP_LOGD("a2dp", "Connection state: %s (see BT_DIAG for correlation)", state_str[state]);
     g_bt_connection_state = state;
     g_bt_state_display_dirty = true;
     g_a2dp_connected = (state == ESP_A2D_CONNECTION_STATE_CONNECTED);
@@ -917,6 +1026,7 @@ void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
 
 void a2dp_audio_state_callback(esp_a2d_audio_state_t state, void* obj) {
     (void)obj;
+    ESP_LOGI("BT_DIAG", "event=a2dp_audio_stream state=%d millis=%lu", (int)state, (unsigned long)millis());
     g_a2dp_audio_state = state;
     stats_reset_callback_gap();
     if (state != ESP_A2D_AUDIO_STATE_STARTED) {
@@ -1175,6 +1285,7 @@ void setup() {
 
     // Setup A2DP callbacks
     a2dp_sink.set_on_connection_state_changed(connection_state_callback);
+    a2dp_sink.set_avrc_connection_state_callback(diag_bt_avrcp_connection_cb);
     a2dp_sink.set_on_audio_state_changed(a2dp_audio_state_callback, nullptr);
     a2dp_sink.set_digital_volume_control(false);
     a2dp_sink.set_on_volumechange(handle_host_volume_change);
@@ -1200,6 +1311,7 @@ void setup() {
     startup_step("S14", "before_a2dp.start");
     a2dp_sink.start("M5Blue");
     startup_step("S15", "after_a2dp.start");
+    ESP_LOGI("BT_DIAG", "event=sink_listen_ready millis=%lu device_name=M5Blue", (unsigned long)millis());
     // Reinforce after BT stack init (ESP32-A2DP fork uses ESP_LOGD for AVRCP volume paths).
     esp_log_level_set("BT_AV", ESP_LOG_WARN);
 
