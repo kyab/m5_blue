@@ -1,5 +1,5 @@
 // STFT 2048 / 1024 + Hann; Essentia OnsetDetection methods complex, rms, melflux (same spectrum chain).
-// Large FFT / ring buffers are allocated in PSRAM when available (DRAM is tight with BT stack).
+// Large FFT/STFT allocations use PSRAM only; omitting DRAM fallback avoids starving FreeRTOS at boot with BT stacks.
 
 #pragma once
 

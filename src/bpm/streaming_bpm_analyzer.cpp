@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <esp_heap_caps.h>
+#include <esp_log.h>
 
 namespace bpm {
 
@@ -32,10 +33,7 @@ StreamingBpmAnalyzer::StreamingBpmAnalyzer()
       branch_mel_(BpmConfig::odfSampleRateX2()) {
     fifo_buf_ = static_cast<uint8_t*>(heap_caps_malloc(kFifoBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (fifo_buf_ == nullptr) {
-        fifo_buf_ = static_cast<uint8_t*>(heap_caps_malloc(kFifoBytes, MALLOC_CAP_8BIT));
-    }
-    if (fifo_buf_ == nullptr) {
-        Serial.println("bpm: FIFO alloc failed (PSRAM/DRAM)");
+        ESP_LOGE("bpm", "FIFO alloc failed (PSRAM required; %u bytes)", (unsigned)kFifoBytes);
     }
 }
 
@@ -154,9 +152,11 @@ void bpm_worker_task(void* arg) {
 void start_bpm_worker_task(StreamingBpmAnalyzer* analyzer) {
     if (analyzer == nullptr) return;
     s_bpm_for_task = analyzer;
-    BaseType_t ok = xTaskCreatePinnedToCore(bpm_worker_task, "bpm_work", 12288, nullptr, 1, nullptr, 0);
+    // FreeRTOS stack depth is in StackType_t words (see Arduino xTaskCreatePinnedToCore); 4096 matches I2S writer scale.
+    constexpr uint32_t kBpmWorkerStackWords = 4096;
+    BaseType_t ok = xTaskCreatePinnedToCore(bpm_worker_task, "bpm_work", kBpmWorkerStackWords, nullptr, 1, nullptr, 0);
     if (ok != pdPASS) {
-        Serial.println("bpm: failed to create bpm_work task");
+        ESP_LOGE("bpm", "failed to create bpm_work task");
     }
 }
 

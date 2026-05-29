@@ -34,25 +34,15 @@ bool StftOdfPipeline::allocBuffers() {
     mel_linear_ = static_cast<float*>(heap_caps_malloc(mel_bytes, caps));
     prev_mel_db_ = static_cast<float*>(heap_caps_malloc(mel_bytes, caps));
 
+    // Avoid mirroring FFT/STFT allocations into internal DRAM: they are large (~100KiB+) and starve FreeRTOS /
+    // Arduino boot-time task stacks (startup assert in esp_startup_start_app_common).
     if (!ring_ || !hann_ || !fft_real_ || !fft_imag_ || !mag_ || !phase_ || !phase_1_ || !phase_2_ || !spectrum_1_ || !mel_linear_
         || !prev_mel_db_) {
         freeBuffers();
-        caps = MALLOC_CAP_8BIT;
-        ring_ = static_cast<float*>(heap_caps_malloc(ring_bytes, caps));
-        hann_ = static_cast<float*>(heap_caps_malloc(static_cast<size_t>(BpmConfig::kFftSize) * sizeof(float), caps));
-        fft_real_ = static_cast<double*>(heap_caps_malloc(fft_bytes, caps));
-        fft_imag_ = static_cast<double*>(heap_caps_malloc(fft_bytes, caps));
-        mag_ = static_cast<float*>(heap_caps_malloc(spec_bytes, caps));
-        phase_ = static_cast<float*>(heap_caps_malloc(spec_bytes, caps));
-        phase_1_ = static_cast<float*>(heap_caps_malloc(spec_bytes, caps));
-        phase_2_ = static_cast<float*>(heap_caps_malloc(spec_bytes, caps));
-        spectrum_1_ = static_cast<float*>(heap_caps_malloc(spec_bytes, caps));
-        mel_linear_ = static_cast<float*>(heap_caps_malloc(mel_bytes, caps));
-        prev_mel_db_ = static_cast<float*>(heap_caps_malloc(mel_bytes, caps));
+        return false;
     }
 
-    return ring_ && hann_ && fft_real_ && fft_imag_ && mag_ && phase_ && phase_1_ && phase_2_ && spectrum_1_ && mel_linear_
-           && prev_mel_db_;
+    return true;
 }
 
 void StftOdfPipeline::freeBuffers() {

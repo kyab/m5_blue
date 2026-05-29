@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <new>
 
 // MCLK output configuration (required for ES8388)
 #include "soc/io_mux_reg.h"
@@ -408,7 +409,9 @@ static volatile float g_dj_filter_target_value = 0.0f;
 static float s_dj_left[kI2SWriterFrames];
 static float s_dj_right[kI2SWriterFrames];
 
-static bpm::StreamingBpmAnalyzer g_streaming_bpm;
+// Construct after M5.begin() so PSRAM is available; static construction runs before loopTask is created and
+// large SPIRAM mallocs can fail and fall back to internal DRAM, starving FreeRTOS at boot.
+static bpm::StreamingBpmAnalyzer* g_streaming_bpm = nullptr;
 
 // When the A2DP source sends long runs of digital silence (pause, track gap, app mute),
 // some DAC paths treat "all zero" PCM as an idle state and create audible clicks at
@@ -877,8 +880,8 @@ static void i2s_writer_task(void* arg) {
 // Audio callback - keep Bluetooth ingress lightweight; effects run immediately before I2S writes.
 void audio_callback(int16_t* data, uint32_t sample_num) {
     stats_note_callback(sample_num);
-    if (data != nullptr && sample_num >= 2 && (sample_num & 1u) == 0) {
-        g_streaming_bpm.enqueueStereoInterleaved(data, sample_num);
+    if (data != nullptr && sample_num >= 2 && (sample_num & 1u) == 0 && g_streaming_bpm != nullptr) {
+        g_streaming_bpm->enqueueStereoInterleaved(data, sample_num);
     }
 
     static bool first_call = true;
@@ -926,7 +929,9 @@ void a2dp_audio_state_callback(esp_a2d_audio_state_t state, void* obj) {
     stats_reset_callback_gap();
     if (state != ESP_A2D_AUDIO_STATE_STARTED) {
         bt_pcm_ring_clear();
-        g_streaming_bpm.reset();
+        if (g_streaming_bpm != nullptr) {
+            g_streaming_bpm->reset();
+        }
     }
 }
 
@@ -990,6 +995,13 @@ void setup() {
     auto cfg = M5.config();
     M5.begin(cfg);
     startup_step("S01", "M5.begin");
+
+    if (g_streaming_bpm == nullptr) {
+        g_streaming_bpm = new (std::nothrow) bpm::StreamingBpmAnalyzer();
+        if (g_streaming_bpm == nullptr) {
+            ESP_LOGE("main", "StreamingBpmAnalyzer object allocation failed");
+        }
+    }
 
     Serial.begin(115200);
     startup_step("S02", "Serial.begin");
@@ -1159,7 +1171,11 @@ void setup() {
             ESP_LOGE("main", "Failed to start I2S writer task");
         }
     }
-    bpm::start_bpm_worker_task(&g_streaming_bpm);
+    if (g_streaming_bpm != nullptr) {
+        bpm::start_bpm_worker_task(g_streaming_bpm);
+    } else {
+        ESP_LOGW("main", "BPM analyzer not constructed; skipping bpm worker task");
+    }
     startup_step("S12", "i2s.begin");
 
     {
@@ -1239,7 +1255,7 @@ void loop() {
             M5.Display.fillRect(0, 140, 320, 28, BLACK);
             M5.Display.setCursor(0, 140);
             M5.Display.setTextColor(CYAN);
-            float b = g_streaming_bpm.bpm();
+            float b = (g_streaming_bpm != nullptr) ? g_streaming_bpm->bpm() : 0.0f;
             if (b < 1.0f) {
                 M5.Display.print("BPM: ---");
             } else {
