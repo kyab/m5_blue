@@ -194,7 +194,7 @@ static inline void control_stats_note_us(uint32_t& min_v, uint32_t& max_v, uint3
 static void dump_control_stats_if_due() {
     static uint32_t s_last_dump_ms = 0;
     uint32_t now_ms = (uint32_t)millis();
-    if (now_ms - s_last_dump_ms < 1000) return;
+    if (now_ms - s_last_dump_ms < 10000) return;
     s_last_dump_ms = now_ms;
 
     ControlLoopStats stats = s_control_stats;
@@ -240,7 +240,7 @@ static void dump_control_stats_if_due() {
 static void dump_audio_stats_if_due() {
     static uint32_t s_last_dump_ms = 0;
     uint32_t now_ms = (uint32_t)millis();
-    if (now_ms - s_last_dump_ms < 1000) return;
+    if (now_ms - s_last_dump_ms < 10000) return;
     s_last_dump_ms = now_ms;
 
     AudioStats stats;
