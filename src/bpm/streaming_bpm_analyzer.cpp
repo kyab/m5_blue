@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <esp_heap_caps.h>
+#include <esp_log.h>
 
 namespace bpm {
 
@@ -32,10 +33,7 @@ StreamingBpmAnalyzer::StreamingBpmAnalyzer()
       branch_mel_(BpmConfig::odfSampleRateX2()) {
     fifo_buf_ = static_cast<uint8_t*>(heap_caps_malloc(kFifoBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (fifo_buf_ == nullptr) {
-        fifo_buf_ = static_cast<uint8_t*>(heap_caps_malloc(kFifoBytes, MALLOC_CAP_8BIT));
-    }
-    if (fifo_buf_ == nullptr) {
-        Serial.println("bpm: FIFO alloc failed (PSRAM/DRAM)");
+        ESP_LOGE("bpm", "FIFO alloc failed (PSRAM required; %u bytes)", (unsigned)kFifoBytes);
     }
 }
 
@@ -102,6 +100,7 @@ void StreamingBpmAnalyzer::enqueueStereoInterleaved(const int16_t* pcm, size_t t
 
 void StreamingBpmAnalyzer::service() {
     if (fifo_buf_ == nullptr) return;
+    size_t processed = 0;
     for (;;) {
         int16_t L = 0;
         int16_t R = 0;
@@ -130,6 +129,11 @@ void StreamingBpmAnalyzer::service() {
             branch_mel_.pushStftHop(tri.melflux_odf);
             fuseMedianEwma();
         }
+
+        processed++;
+        if (processed >= kServiceMonoSampleBudget) {
+            break;
+        }
     }
 }
 
@@ -145,7 +149,7 @@ void bpm_worker_task(void* arg) {
     }
     for (;;) {
         s_bpm_for_task->service();
-        vTaskDelay(pdMS_TO_TICKS(2));
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -154,9 +158,13 @@ void bpm_worker_task(void* arg) {
 void start_bpm_worker_task(StreamingBpmAnalyzer* analyzer) {
     if (analyzer == nullptr) return;
     s_bpm_for_task = analyzer;
-    BaseType_t ok = xTaskCreatePinnedToCore(bpm_worker_task, "bpm_work", 12288, nullptr, 1, nullptr, 0);
+    // Core 1: keep FFT/STFT off core 0 where BT stack (BTC_TASK) and IDLE0 WDT live.
+    constexpr uint32_t kBpmWorkerStackWords = 4096;
+    constexpr BaseType_t kBpmWorkerCore = 1;
+    BaseType_t ok =
+        xTaskCreatePinnedToCore(bpm_worker_task, "bpm_work", kBpmWorkerStackWords, nullptr, 1, nullptr, kBpmWorkerCore);
     if (ok != pdPASS) {
-        Serial.println("bpm: failed to create bpm_work task");
+        ESP_LOGE("bpm", "failed to create bpm_work task");
     }
 }
 

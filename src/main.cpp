@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <new>
 
 // MCLK output configuration (required for ES8388)
 #include "soc/io_mux_reg.h"
@@ -394,6 +395,9 @@ protected:
 // Bluetooth A2DP Sink with I2SStream
 BluetoothA2DPSinkKeepI2S a2dp_sink(a2dp_output);
 
+// Set false to bypass blue Freezer / red delay (button-driven effects only; DJ filter stays on knob).
+static constexpr bool kButtonEffectsEnabled = false;
+
 // Ring buffer: delay (red) disabled for now; used by Going-Zero-style Freezer (blue) on g_ring.
 RingBufferInterleaved* g_ring = nullptr;
 
@@ -408,7 +412,8 @@ static volatile float g_dj_filter_target_value = 0.0f;
 static float s_dj_left[kI2SWriterFrames];
 static float s_dj_right[kI2SWriterFrames];
 
-static bpm::StreamingBpmAnalyzer g_streaming_bpm;
+// Construct after M5.begin() so PSRAM is ready; static init runs before loopTask and can exhaust DRAM.
+static bpm::StreamingBpmAnalyzer* g_streaming_bpm = nullptr;
 
 // When the A2DP source sends long runs of digital silence (pause, track gap, app mute),
 // some DAC paths treat "all zero" PCM as an idle state and create audible clicks at
@@ -749,7 +754,7 @@ static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool f
 #endif
         (void)red_enabled;
 
-        if (g_ring != nullptr) {
+        if (kButtonEffectsEnabled && g_ring != nullptr) {
             g_ring->storeSamples(data, frame_count);
             apply_going_zero_freezer(data, frame_count);
         }
@@ -877,8 +882,8 @@ static void i2s_writer_task(void* arg) {
 // Audio callback - keep Bluetooth ingress lightweight; effects run immediately before I2S writes.
 void audio_callback(int16_t* data, uint32_t sample_num) {
     stats_note_callback(sample_num);
-    if (data != nullptr && sample_num >= 2 && (sample_num & 1u) == 0) {
-        g_streaming_bpm.enqueueStereoInterleaved(data, sample_num);
+    if (data != nullptr && sample_num >= 2 && (sample_num & 1u) == 0 && g_streaming_bpm != nullptr) {
+        g_streaming_bpm->enqueueStereoInterleaved(data, sample_num);
     }
 
     static bool first_call = true;
@@ -926,7 +931,9 @@ void a2dp_audio_state_callback(esp_a2d_audio_state_t state, void* obj) {
     stats_reset_callback_gap();
     if (state != ESP_A2D_AUDIO_STATE_STARTED) {
         bt_pcm_ring_clear();
-        g_streaming_bpm.reset();
+        if (g_streaming_bpm != nullptr) {
+            g_streaming_bpm->reset();
+        }
     }
 }
 
@@ -991,6 +998,13 @@ void setup() {
     M5.begin(cfg);
     startup_step("S01", "M5.begin");
 
+    if (g_streaming_bpm == nullptr) {
+        g_streaming_bpm = new (std::nothrow) bpm::StreamingBpmAnalyzer();
+        if (g_streaming_bpm == nullptr) {
+            ESP_LOGE("main", "StreamingBpmAnalyzer allocation failed");
+        }
+    }
+
     Serial.begin(115200);
     startup_step("S02", "Serial.begin");
 
@@ -1045,8 +1059,12 @@ void setup() {
     if (xTaskCreatePinnedToCore(module_rgb_led_task, "ModRgbLed", 3072, nullptr, 3, &s_module_led_task, 0) != pdPASS) {
         ESP_LOGE("main", "Failed to create ModRgbLed task");
     }
-    if (xTaskCreatePinnedToCore(dual_button_poll_task, "DualBtn", 3072, nullptr, 6, nullptr, 0) != pdPASS) {
-        ESP_LOGE("main", "Failed to create DualBtn task");
+    if (kButtonEffectsEnabled) {
+        if (xTaskCreatePinnedToCore(dual_button_poll_task, "DualBtn", 3072, nullptr, 6, nullptr, 0) != pdPASS) {
+            ESP_LOGE("main", "Failed to create DualBtn task");
+        }
+    } else {
+        ESP_LOGI("main", "Button effects disabled (kButtonEffectsEnabled=false)");
     }
 
     // Core2 onboard speaker/analog pins overlap Module Audio MCLK/I2S; release driver first.
@@ -1135,9 +1153,13 @@ void setup() {
     }
     startup_step("S09", "DAC_Mixer_Bypass_Off");
 
-    ESP_LOGI("main", "Initializing ring buffer...");
-    g_ring = new RingBufferInterleaved();
-    ESP_LOGI("main", "Ring buffer OK");
+    if (kButtonEffectsEnabled) {
+        ESP_LOGI("main", "Initializing ring buffer...");
+        g_ring = new RingBufferInterleaved();
+        ESP_LOGI("main", "Ring buffer OK");
+    } else {
+        ESP_LOGI("main", "Skipping ring buffer (button effects disabled)");
+    }
     startup_step("S10", "ring_buffer");
 
     ESP_LOGI("main", "Configuring I2SStream for Module Audio...");
@@ -1159,7 +1181,11 @@ void setup() {
             ESP_LOGE("main", "Failed to start I2S writer task");
         }
     }
-    bpm::start_bpm_worker_task(&g_streaming_bpm);
+    if (g_streaming_bpm != nullptr) {
+        bpm::start_bpm_worker_task(g_streaming_bpm);
+    } else {
+        ESP_LOGW("main", "BPM analyzer unavailable; skipping bpm_work task");
+    }
     startup_step("S12", "i2s.begin");
 
     {
@@ -1239,7 +1265,7 @@ void loop() {
             M5.Display.fillRect(0, 140, 320, 28, BLACK);
             M5.Display.setCursor(0, 140);
             M5.Display.setTextColor(CYAN);
-            float b = g_streaming_bpm.bpm();
+            float b = (g_streaming_bpm != nullptr) ? g_streaming_bpm->bpm() : 0.0f;
             if (b < 1.0f) {
                 M5.Display.print("BPM: ---");
             } else {
