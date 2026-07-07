@@ -395,8 +395,9 @@ protected:
 // Bluetooth A2DP Sink with I2SStream
 BluetoothA2DPSinkKeepI2S a2dp_sink(a2dp_output);
 
-// Set false to bypass blue Freezer / red delay (button-driven effects only; DJ filter stays on knob).
-static constexpr bool kButtonEffectsEnabled = false;
+// Master switch for all audio effects applied in the I2S writer path: blue Freezer / red delay
+// (button-driven) and the knob-driven DJ filter. Set false to pass BT PCM through untouched.
+static constexpr bool kAudioEffectsEnabled = false;
 
 // Ring buffer: delay (red) disabled for now; used by Going-Zero-style Freezer (blue) on g_ring.
 RingBufferInterleaved* g_ring = nullptr;
@@ -754,33 +755,35 @@ static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool f
 #endif
         (void)red_enabled;
 
-        if (kButtonEffectsEnabled && g_ring != nullptr) {
-            g_ring->storeSamples(data, frame_count);
-            apply_going_zero_freezer(data, frame_count);
-        }
+        if (kAudioEffectsEnabled) {
+            if (g_ring != nullptr) {
+                g_ring->storeSamples(data, frame_count);
+                apply_going_zero_freezer(data, frame_count);
+            }
 
-        float target_v = g_dj_filter_target_value;
-        if (target_v != s_applied_dj_filter_value) {
-            g_dj_filter.setFilterValue(target_v);
-            s_applied_dj_filter_value = target_v;
-        }
+            float target_v = g_dj_filter_target_value;
+            if (target_v != s_applied_dj_filter_value) {
+                g_dj_filter.setFilterValue(target_v);
+                s_applied_dj_filter_value = target_v;
+            }
 
-        // DJ Filter (Going-Zero): deinterleave int16 -> float, process, reinterleave back with clamp.
-        uint32_t n = (frame_count > kI2SWriterFrames) ? kI2SWriterFrames : frame_count;
-        for (uint32_t i = 0; i < n; i++) {
-            s_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
-            s_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
-        }
-        g_dj_filter.process(s_dj_left, s_dj_right, n);
-        for (uint32_t i = 0; i < n; i++) {
-            float l = s_dj_left[i] * 32768.0f;
-            float r = s_dj_right[i] * 32768.0f;
-            if (l > 32767.0f) l = 32767.0f;
-            else if (l < -32768.0f) l = -32768.0f;
-            if (r > 32767.0f) r = 32767.0f;
-            else if (r < -32768.0f) r = -32768.0f;
-            data[i * 2] = static_cast<int16_t>(l);
-            data[i * 2 + 1] = static_cast<int16_t>(r);
+            // DJ Filter (Going-Zero): deinterleave int16 -> float, process, reinterleave back with clamp.
+            uint32_t n = (frame_count > kI2SWriterFrames) ? kI2SWriterFrames : frame_count;
+            for (uint32_t i = 0; i < n; i++) {
+                s_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
+                s_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
+            }
+            g_dj_filter.process(s_dj_left, s_dj_right, n);
+            for (uint32_t i = 0; i < n; i++) {
+                float l = s_dj_left[i] * 32768.0f;
+                float r = s_dj_right[i] * 32768.0f;
+                if (l > 32767.0f) l = 32767.0f;
+                else if (l < -32768.0f) l = -32768.0f;
+                if (r > 32767.0f) r = 32767.0f;
+                else if (r < -32768.0f) r = -32768.0f;
+                data[i * 2] = static_cast<int16_t>(l);
+                data[i * 2 + 1] = static_cast<int16_t>(r);
+            }
         }
     }
 
@@ -1059,12 +1062,12 @@ void setup() {
     if (xTaskCreatePinnedToCore(module_rgb_led_task, "ModRgbLed", 3072, nullptr, 3, &s_module_led_task, 0) != pdPASS) {
         ESP_LOGE("main", "Failed to create ModRgbLed task");
     }
-    if (kButtonEffectsEnabled) {
+    if (kAudioEffectsEnabled) {
         if (xTaskCreatePinnedToCore(dual_button_poll_task, "DualBtn", 3072, nullptr, 6, nullptr, 0) != pdPASS) {
             ESP_LOGE("main", "Failed to create DualBtn task");
         }
     } else {
-        ESP_LOGI("main", "Button effects disabled (kButtonEffectsEnabled=false)");
+        ESP_LOGI("main", "Audio effects disabled (kAudioEffectsEnabled=false): Freezer + DJ filter bypassed");
     }
 
     // Core2 onboard speaker/analog pins overlap Module Audio MCLK/I2S; release driver first.
@@ -1153,12 +1156,12 @@ void setup() {
     }
     startup_step("S09", "DAC_Mixer_Bypass_Off");
 
-    if (kButtonEffectsEnabled) {
+    if (kAudioEffectsEnabled) {
         ESP_LOGI("main", "Initializing ring buffer...");
         g_ring = new RingBufferInterleaved();
         ESP_LOGI("main", "Ring buffer OK");
     } else {
-        ESP_LOGI("main", "Skipping ring buffer (button effects disabled)");
+        ESP_LOGI("main", "Skipping ring buffer (audio effects disabled)");
     }
     startup_step("S10", "ring_buffer");
 
