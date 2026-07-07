@@ -7,12 +7,14 @@
 #include "BluetoothA2DPSink.h"
 #include "RingBuffer.hpp"
 #include "DJFilter.hpp"
+#include "bpm/streaming_bpm_analyzer.hpp"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <new>
 
 // MCLK output configuration (required for ES8388)
 #include "soc/io_mux_reg.h"
@@ -393,6 +395,10 @@ protected:
 // Bluetooth A2DP Sink with I2SStream
 BluetoothA2DPSinkKeepI2S a2dp_sink(a2dp_output);
 
+// Master switch for all audio effects applied in the I2S writer path: blue Freezer / red delay
+// (button-driven) and the knob-driven DJ filter. Set false to pass BT PCM through untouched.
+static constexpr bool kAudioEffectsEnabled = false;
+
 // Ring buffer: delay (red) disabled for now; used by Going-Zero-style Freezer (blue) on g_ring.
 RingBufferInterleaved* g_ring = nullptr;
 
@@ -406,6 +412,9 @@ static volatile float g_dj_filter_target_value = 0.0f;
 // Scratch buffers for int16<->float deinterleave in the I2S writer task.
 static float s_dj_left[kI2SWriterFrames];
 static float s_dj_right[kI2SWriterFrames];
+
+// Construct after M5.begin() so PSRAM is ready; static init runs before loopTask and can exhaust DRAM.
+static bpm::StreamingBpmAnalyzer* g_streaming_bpm = nullptr;
 
 // When the A2DP source sends long runs of digital silence (pause, track gap, app mute),
 // some DAC paths treat "all zero" PCM as an idle state and create audible clicks at
@@ -746,33 +755,35 @@ static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool f
 #endif
         (void)red_enabled;
 
-        if (g_ring != nullptr) {
-            g_ring->storeSamples(data, frame_count);
-            apply_going_zero_freezer(data, frame_count);
-        }
+        if (kAudioEffectsEnabled) {
+            if (g_ring != nullptr) {
+                g_ring->storeSamples(data, frame_count);
+                apply_going_zero_freezer(data, frame_count);
+            }
 
-        float target_v = g_dj_filter_target_value;
-        if (target_v != s_applied_dj_filter_value) {
-            g_dj_filter.setFilterValue(target_v);
-            s_applied_dj_filter_value = target_v;
-        }
+            float target_v = g_dj_filter_target_value;
+            if (target_v != s_applied_dj_filter_value) {
+                g_dj_filter.setFilterValue(target_v);
+                s_applied_dj_filter_value = target_v;
+            }
 
-        // DJ Filter (Going-Zero): deinterleave int16 -> float, process, reinterleave back with clamp.
-        uint32_t n = (frame_count > kI2SWriterFrames) ? kI2SWriterFrames : frame_count;
-        for (uint32_t i = 0; i < n; i++) {
-            s_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
-            s_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
-        }
-        g_dj_filter.process(s_dj_left, s_dj_right, n);
-        for (uint32_t i = 0; i < n; i++) {
-            float l = s_dj_left[i] * 32768.0f;
-            float r = s_dj_right[i] * 32768.0f;
-            if (l > 32767.0f) l = 32767.0f;
-            else if (l < -32768.0f) l = -32768.0f;
-            if (r > 32767.0f) r = 32767.0f;
-            else if (r < -32768.0f) r = -32768.0f;
-            data[i * 2] = static_cast<int16_t>(l);
-            data[i * 2 + 1] = static_cast<int16_t>(r);
+            // DJ Filter (Going-Zero): deinterleave int16 -> float, process, reinterleave back with clamp.
+            uint32_t n = (frame_count > kI2SWriterFrames) ? kI2SWriterFrames : frame_count;
+            for (uint32_t i = 0; i < n; i++) {
+                s_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
+                s_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
+            }
+            g_dj_filter.process(s_dj_left, s_dj_right, n);
+            for (uint32_t i = 0; i < n; i++) {
+                float l = s_dj_left[i] * 32768.0f;
+                float r = s_dj_right[i] * 32768.0f;
+                if (l > 32767.0f) l = 32767.0f;
+                else if (l < -32768.0f) l = -32768.0f;
+                if (r > 32767.0f) r = 32767.0f;
+                else if (r < -32768.0f) r = -32768.0f;
+                data[i * 2] = static_cast<int16_t>(l);
+                data[i * 2 + 1] = static_cast<int16_t>(r);
+            }
         }
     }
 
@@ -873,8 +884,10 @@ static void i2s_writer_task(void* arg) {
 
 // Audio callback - keep Bluetooth ingress lightweight; effects run immediately before I2S writes.
 void audio_callback(int16_t* data, uint32_t sample_num) {
-    (void)data;
     stats_note_callback(sample_num);
+    if (data != nullptr && sample_num >= 2 && (sample_num & 1u) == 0 && g_streaming_bpm != nullptr) {
+        g_streaming_bpm->enqueueStereoInterleaved(data, sample_num);
+    }
 
     static bool first_call = true;
     if (first_call) {
@@ -921,6 +934,9 @@ void a2dp_audio_state_callback(esp_a2d_audio_state_t state, void* obj) {
     stats_reset_callback_gap();
     if (state != ESP_A2D_AUDIO_STATE_STARTED) {
         bt_pcm_ring_clear();
+        if (g_streaming_bpm != nullptr) {
+            g_streaming_bpm->reset();
+        }
     }
 }
 
@@ -985,6 +1001,13 @@ void setup() {
     M5.begin(cfg);
     startup_step("S01", "M5.begin");
 
+    if (g_streaming_bpm == nullptr) {
+        g_streaming_bpm = new (std::nothrow) bpm::StreamingBpmAnalyzer();
+        if (g_streaming_bpm == nullptr) {
+            ESP_LOGE("main", "StreamingBpmAnalyzer allocation failed");
+        }
+    }
+
     Serial.begin(115200);
     startup_step("S02", "Serial.begin");
 
@@ -1039,8 +1062,12 @@ void setup() {
     if (xTaskCreatePinnedToCore(module_rgb_led_task, "ModRgbLed", 3072, nullptr, 3, &s_module_led_task, 0) != pdPASS) {
         ESP_LOGE("main", "Failed to create ModRgbLed task");
     }
-    if (xTaskCreatePinnedToCore(dual_button_poll_task, "DualBtn", 3072, nullptr, 6, nullptr, 0) != pdPASS) {
-        ESP_LOGE("main", "Failed to create DualBtn task");
+    if (kAudioEffectsEnabled) {
+        if (xTaskCreatePinnedToCore(dual_button_poll_task, "DualBtn", 3072, nullptr, 6, nullptr, 0) != pdPASS) {
+            ESP_LOGE("main", "Failed to create DualBtn task");
+        }
+    } else {
+        ESP_LOGI("main", "Audio effects disabled (kAudioEffectsEnabled=false): Freezer + DJ filter bypassed");
     }
 
     // Core2 onboard speaker/analog pins overlap Module Audio MCLK/I2S; release driver first.
@@ -1129,9 +1156,13 @@ void setup() {
     }
     startup_step("S09", "DAC_Mixer_Bypass_Off");
 
-    ESP_LOGI("main", "Initializing ring buffer...");
-    g_ring = new RingBufferInterleaved();
-    ESP_LOGI("main", "Ring buffer OK");
+    if (kAudioEffectsEnabled) {
+        ESP_LOGI("main", "Initializing ring buffer...");
+        g_ring = new RingBufferInterleaved();
+        ESP_LOGI("main", "Ring buffer OK");
+    } else {
+        ESP_LOGI("main", "Skipping ring buffer (audio effects disabled)");
+    }
     startup_step("S10", "ring_buffer");
 
     ESP_LOGI("main", "Configuring I2SStream for Module Audio...");
@@ -1152,6 +1183,11 @@ void setup() {
         if (task_ok != pdPASS) {
             ESP_LOGE("main", "Failed to start I2S writer task");
         }
+    }
+    if (g_streaming_bpm != nullptr) {
+        bpm::start_bpm_worker_task(g_streaming_bpm);
+    } else {
+        ESP_LOGW("main", "BPM analyzer unavailable; skipping bpm_work task");
     }
     startup_step("S12", "i2s.begin");
 
@@ -1224,6 +1260,22 @@ void loop() {
     M5.update();
     control_stats_note_us(s_control_stats.m5_update_us_min, s_control_stats.m5_update_us_max, s_control_stats.m5_update_us_sum, (uint32_t)micros() - section_start_us);
     update_bt_status_display();
+    {
+        static uint32_t s_bpm_ui_ms = 0;
+        uint32_t now_ms = (uint32_t)millis();
+        if (now_ms - s_bpm_ui_ms >= 200) {
+            s_bpm_ui_ms = now_ms;
+            M5.Display.fillRect(0, 140, 320, 28, BLACK);
+            M5.Display.setCursor(0, 140);
+            M5.Display.setTextColor(CYAN);
+            float b = (g_streaming_bpm != nullptr) ? g_streaming_bpm->bpm() : 0.0f;
+            if (b < 1.0f) {
+                M5.Display.print("BPM: ---");
+            } else {
+                M5.Display.printf("BPM: %.2f", (double)b);
+            }
+        }
+    }
     apply_host_volume_to_dac_if_needed();
 
     // Rotation angle unit (Grove B): drive DJ filter every loop, log/display at 5 Hz.
