@@ -195,9 +195,12 @@ struct ControlLoopStats {
     uint32_t button_us_min = UINT32_MAX;
     uint32_t button_us_max = 0;
     uint32_t button_us_sum = 0;
-    uint32_t adc_us_min = UINT32_MAX;
-    uint32_t adc_us_max = 0;
-    uint32_t adc_us_sum = 0;
+    uint32_t adc_button_us_min = UINT32_MAX;
+    uint32_t adc_button_us_max = 0;
+    uint32_t adc_button_us_sum = 0;
+    uint32_t joystick_read_us_min = UINT32_MAX;
+    uint32_t joystick_read_us_max = 0;
+    uint32_t joystick_read_us_sum = 0;
     uint32_t display_us_min = UINT32_MAX;
     uint32_t display_us_max = 0;
     uint32_t display_us_sum = 0;
@@ -230,13 +233,14 @@ static void dump_control_stats_if_due() {
     uint32_t loop_body_min = (stats.loop_body_us_min == UINT32_MAX) ? 0 : stats.loop_body_us_min;
     uint32_t m5_update_min = (stats.m5_update_us_min == UINT32_MAX) ? 0 : stats.m5_update_us_min;
     uint32_t button_min = (stats.button_us_min == UINT32_MAX) ? 0 : stats.button_us_min;
-    uint32_t adc_min = (stats.adc_us_min == UINT32_MAX) ? 0 : stats.adc_us_min;
+    uint32_t adc_button_min = (stats.adc_button_us_min == UINT32_MAX) ? 0 : stats.adc_button_us_min;
+    uint32_t joystick_read_min = (stats.joystick_read_us_min == UINT32_MAX) ? 0 : stats.joystick_read_us_min;
     uint32_t display_min = (stats.display_us_min == UINT32_MAX) ? 0 : stats.display_us_min;
     uint32_t audio_stats_min = (stats.audio_stats_us_min == UINT32_MAX) ? 0 : stats.audio_stats_us_min;
     uint32_t display_avg = (stats.display_update_count == 0) ? 0 : stats.display_us_sum / stats.display_update_count;
 
     ESP_LOGI("control_stats",
-             "loops=%lu gap_us=%lu/%lu/%lu body_us=%lu/%lu/%lu m5_us=%lu/%lu/%lu button_us=%lu/%lu/%lu adc_us=%lu/%lu/%lu display_us=%lu/%lu/%lu display_n=%lu audio_stats_us=%lu/%lu/%lu",
+             "loops=%lu gap_us=%lu/%lu/%lu body_us=%lu/%lu/%lu m5_us=%lu/%lu/%lu button_us=%lu/%lu/%lu adc_button_us=%lu/%lu/%lu joystick_read_us=%lu/%lu/%lu display_us=%lu/%lu/%lu display_n=%lu audio_stats_us=%lu/%lu/%lu",
              (unsigned long)stats.loop_count,
              (unsigned long)loop_gap_min,
              (unsigned long)(stats.loop_gap_us_sum / stats.loop_count),
@@ -250,9 +254,12 @@ static void dump_control_stats_if_due() {
              (unsigned long)button_min,
              (unsigned long)(stats.button_us_sum / stats.loop_count),
              (unsigned long)stats.button_us_max,
-             (unsigned long)adc_min,
-             (unsigned long)(stats.adc_us_sum / stats.loop_count),
-             (unsigned long)stats.adc_us_max,
+             (unsigned long)adc_button_min,
+             (unsigned long)(stats.adc_button_us_sum / stats.loop_count),
+             (unsigned long)stats.adc_button_us_max,
+             (unsigned long)joystick_read_min,
+             (unsigned long)(stats.joystick_read_us_sum / stats.loop_count),
+             (unsigned long)stats.joystick_read_us_max,
              (unsigned long)display_min,
              (unsigned long)display_avg,
              (unsigned long)stats.display_us_max,
@@ -473,7 +480,7 @@ static void update_dj_filter_from_rotation_angle() {
     for (int i = 0; i < kOversampleN; i++) {
         mV_sum += analogReadMilliVolts(ROTATION_ANGLE_GPIO);
     }
-    control_stats_note_us(s_control_stats.adc_us_min, s_control_stats.adc_us_max, s_control_stats.adc_us_sum,
+    control_stats_note_us(s_control_stats.adc_button_us_min, s_control_stats.adc_button_us_max, s_control_stats.adc_button_us_sum,
                           (uint32_t)micros() - section_start_us);
     int mV_avg = mV_sum / kOversampleN;
 
@@ -551,8 +558,8 @@ static void update_dj_filter_from_joystick2() {
         // Z button: 0 = pressed (ON), 1 = released
         button = g_joystick2.get_button_value();
         y_off = g_joystick2.get_joy_adc_12bits_offset_value_y();
-        control_stats_note_us(s_control_stats.adc_us_min, s_control_stats.adc_us_max, s_control_stats.adc_us_sum,
-                              (uint32_t)micros() - section_start_us);
+        control_stats_note_us(s_control_stats.joystick_read_us_min, s_control_stats.joystick_read_us_max,
+                              s_control_stats.joystick_read_us_sum, (uint32_t)micros() - section_start_us);
 
         const bool z_on = (button == 0);
         if (z_on) {
