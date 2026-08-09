@@ -38,12 +38,37 @@
 #define SYS_I2S_DOUT_PIN 2
 #define SYS_I2S_DIN_PIN 34
 
-// Dual button: Core2 side PORT.A only (G32/G33)
+// Dual button: Core2 side PORT.A only (G32/G33). Mutually exclusive with Joystick2 on PORT.A.
 #define DUAL_BUTTON_BLUE 33
 #define DUAL_BUTTON_RED 32
 
-// Rotation angle unit (M5STACK-U005): connect to PORT.B (black, analog) on the Bottom module; G36 = ADC
+// PORT.A Grove I2C (Core2 side): G32=SDA, G33=SCL
+#define PORT_A_I2C_SDA_PIN 32
+#define PORT_A_I2C_SCL_PIN 33
+
+// DJ filter control source — enable exactly one.
+//   DJ_FILTER_CTRL_JOYSTICK2      : Unit Joystick2 on PORT.A (I2C @0x63). Hold Z and move Y.
+//   DJ_FILTER_CTRL_ROTATION_ANGLE : Rotation angle unit (M5STACK-U005) on PORT.B (G36 ADC).
+#define DJ_FILTER_CTRL_JOYSTICK2 1
+// #define DJ_FILTER_CTRL_ROTATION_ANGLE 1
+
+#if defined(DJ_FILTER_CTRL_JOYSTICK2) && defined(DJ_FILTER_CTRL_ROTATION_ANGLE)
+#error "Enable only one of DJ_FILTER_CTRL_JOYSTICK2 or DJ_FILTER_CTRL_ROTATION_ANGLE"
+#endif
+#if !defined(DJ_FILTER_CTRL_JOYSTICK2) && !defined(DJ_FILTER_CTRL_ROTATION_ANGLE)
+#error "Define DJ_FILTER_CTRL_JOYSTICK2 or DJ_FILTER_CTRL_ROTATION_ANGLE"
+#endif
+
+#if defined(DJ_FILTER_CTRL_ROTATION_ANGLE)
+// Rotation angle unit (M5STACK-U005): PORT.B (black, analog) on the Bottom module; G36 = ADC
 #define ROTATION_ANGLE_GPIO 36
+// Dual button may use PORT.A only when Joystick2 is not occupying it.
+#define USE_DUAL_BUTTON_PORT_A 1
+#endif
+
+#if defined(DJ_FILTER_CTRL_JOYSTICK2)
+#include "m5_unit_joystick2.hpp"
+#endif
 
 // Audio I2C device (for RGB LED, HP detect, etc.)
 AudioI2c device;
@@ -400,12 +425,158 @@ RingBufferInterleaved* g_ring = nullptr;
 volatile bool g_effect_blue = false; // Freezer (Going-Zero Freeze / Freezer.m)
 volatile bool g_effect_red = false;  // Delay effect (disabled — shares g_ring with Freezer)
 
-// DJ Filter (Going-Zero port): knob-driven LPF/HPF crossover
+// DJ Filter (Going-Zero port): controller-driven LPF/HPF crossover
 static DJFilter g_dj_filter;
 static volatile float g_dj_filter_target_value = 0.0f;
 // Scratch buffers for int16<->float deinterleave in the I2S writer task.
 static float s_dj_left[kI2SWriterFrames];
 static float s_dj_right[kI2SWriterFrames];
+
+// Same bypass deadzone as the U005 path so near-center / near-zero hits exact bypass.
+static const float kDjFilterBypassDeadzone = 0.03f;
+
+// Clamp to [-1, +1], apply bypass deadzone, and publish to the I2S writer task.
+static float apply_dj_filter_target_value(float v) {
+    if (v > 1.0f) v = 1.0f;
+    if (v < -1.0f) v = -1.0f;
+    if (fabsf(v) < kDjFilterBypassDeadzone) v = 0.0f;
+    g_dj_filter_target_value = v;
+    return v;
+}
+
+#if defined(DJ_FILTER_CTRL_ROTATION_ANGLE)
+// Piecewise-linear U005 calibration (mV) -> DJFilter v in [-1, +1].
+//   full left  (3145 mV) -> -1 (LPF heavy)
+//   center     (2100 mV) ->  0 (bypass)
+//   full right ( 142 mV) -> +1 (HPF heavy)
+static float map_rotation_angle_mv_to_filter_v(int mV) {
+    const int ROT_MV_LEFT = 3145;
+    const int ROT_MV_CENTER = 2100;
+    const int ROT_MV_RIGHT = 142;
+
+    float v;
+    if (mV >= ROT_MV_CENTER) {
+        v = -(float)(mV - ROT_MV_CENTER) / (float)(ROT_MV_LEFT - ROT_MV_CENTER);
+    } else {
+        v = (float)(ROT_MV_CENTER - mV) / (float)(ROT_MV_CENTER - ROT_MV_RIGHT);
+    }
+    return v;
+}
+
+// Read U005 on PORT.B, smooth, map to filter v, and refresh the on-screen readout.
+static void update_dj_filter_from_rotation_angle() {
+    // ESP32 ADC on GPIO36 is inherently noisy; apply (A) oversampling + (B) EMA low-pass
+    // before mapping to v. Knob is asymmetric around center, so mapping is piecewise linear.
+    const int kOversampleN = 8;
+    int mV_sum = 0;
+    uint32_t section_start_us = (uint32_t)micros();
+    for (int i = 0; i < kOversampleN; i++) {
+        mV_sum += analogReadMilliVolts(ROTATION_ANGLE_GPIO);
+    }
+    control_stats_note_us(s_control_stats.adc_us_min, s_control_stats.adc_us_max, s_control_stats.adc_us_sum,
+                          (uint32_t)micros() - section_start_us);
+    int mV_avg = mV_sum / kOversampleN;
+
+    static float s_mV_filt = 0.0f;
+    static bool s_ema_init = false;
+    const float kEmaAlpha = 0.65f;
+    if (!s_ema_init) {
+        s_mV_filt = (float)mV_avg;
+        s_ema_init = true;
+    } else {
+        s_mV_filt = kEmaAlpha * (float)mV_avg + (1.0f - kEmaAlpha) * s_mV_filt;
+    }
+    int mV = (int)s_mV_filt;
+
+    static int s_mV_min = 99999;
+    static int s_mV_max = -1;
+    if (mV < s_mV_min) s_mV_min = mV;
+    if (mV > s_mV_max) s_mV_max = mV;
+
+    float v = apply_dj_filter_target_value(map_rotation_angle_mv_to_filter_v(mV));
+
+    static uint32_t last_rotation_dump_ms = 0;
+    uint32_t now_ms = (uint32_t)millis();
+    if (now_ms - last_rotation_dump_ms >= 200) {
+        last_rotation_dump_ms = now_ms;
+        section_start_us = (uint32_t)micros();
+        M5.Display.fillRect(0, 200, 320, 20, BLACK);
+        M5.Display.setCursor(0, 200);
+        M5.Display.setTextColor(YELLOW);
+        M5.Display.printf("mV=%4d  v=%+.2f", mV, (double)v);
+        control_stats_note_us(s_control_stats.display_us_min, s_control_stats.display_us_max, s_control_stats.display_us_sum,
+                              (uint32_t)micros() - section_start_us);
+        s_control_stats.display_update_count++;
+    }
+}
+#endif  // DJ_FILTER_CTRL_ROTATION_ANGLE
+
+#if defined(DJ_FILTER_CTRL_JOYSTICK2)
+static M5UnitJoystick2 g_joystick2;
+static bool g_joystick2_ok = false;
+
+// 12-bit Y offset full-scale used to reach |v|=1 at physical extremes (hall units ~±2k).
+static const int16_t kJoystick2YOffsetFullScale = 2000;
+
+// Positive Y offset = stick toward top (UiFlow convention) -> LPF (negative v).
+// Negative Y offset = stick toward bottom -> HPF (positive v).
+static float map_joystick2_y_offset_to_filter_v(int16_t y_offset) {
+    return -(float)y_offset / (float)kJoystick2YOffsetFullScale;
+}
+
+static bool init_joystick2_porta() {
+    g_joystick2_ok = g_joystick2.begin(&Wire1, JOYSTICK2_ADDR, PORT_A_I2C_SDA_PIN, PORT_A_I2C_SCL_PIN, 400000UL);
+    if (g_joystick2_ok) {
+        ESP_LOGI("main", "Joystick2 OK on PORT.A addr=0x%02X", JOYSTICK2_ADDR);
+        g_joystick2.set_rgb_color(0x001000);
+        M5.Display.setTextColor(GREEN);
+        M5.Display.println("Joystick2: OK");
+    } else {
+        ESP_LOGW("main", "Joystick2 not found on PORT.A (SDA=%d SCL=%d)", PORT_A_I2C_SDA_PIN, PORT_A_I2C_SCL_PIN);
+        M5.Display.setTextColor(YELLOW);
+        M5.Display.println("Joystick2: N/A");
+        g_dj_filter_target_value = 0.0f;
+    }
+    return g_joystick2_ok;
+}
+
+// Hold Z (button) and move Y to drive the DJ filter; otherwise force bypass.
+static void update_dj_filter_from_joystick2() {
+    float v = 0.0f;
+    uint8_t button = 1;
+    int16_t y_off = 0;
+
+    if (g_joystick2_ok) {
+        uint32_t section_start_us = (uint32_t)micros();
+        // Z button: 0 = pressed (ON), 1 = released
+        button = g_joystick2.get_button_value();
+        y_off = g_joystick2.get_joy_adc_12bits_offset_value_y();
+        control_stats_note_us(s_control_stats.adc_us_min, s_control_stats.adc_us_max, s_control_stats.adc_us_sum,
+                              (uint32_t)micros() - section_start_us);
+
+        const bool z_on = (button == 0);
+        if (z_on) {
+            v = map_joystick2_y_offset_to_filter_v(y_off);
+        }
+    }
+
+    v = apply_dj_filter_target_value(v);
+
+    static uint32_t last_joy_dump_ms = 0;
+    uint32_t now_ms = (uint32_t)millis();
+    if (now_ms - last_joy_dump_ms >= 200) {
+        last_joy_dump_ms = now_ms;
+        uint32_t section_start_us = (uint32_t)micros();
+        M5.Display.fillRect(0, 200, 320, 20, BLACK);
+        M5.Display.setCursor(0, 200);
+        M5.Display.setTextColor(YELLOW);
+        M5.Display.printf("Z=%d Y=%+5d v=%+.2f", (button == 0) ? 1 : 0, (int)y_off, (double)v);
+        control_stats_note_us(s_control_stats.display_us_min, s_control_stats.display_us_max, s_control_stats.display_us_sum,
+                              (uint32_t)micros() - section_start_us);
+        s_control_stats.display_update_count++;
+    }
+}
+#endif  // DJ_FILTER_CTRL_JOYSTICK2
 
 // When the A2DP source sends long runs of digital silence (pause, track gap, app mute),
 // some DAC paths treat "all zero" PCM as an idle state and create audible clicks at
@@ -432,8 +603,10 @@ enum class DacVolumeCurve {
 static DacVolumeCurve s_dac_volume_curve = DacVolumeCurve::Linear;
 static int s_last_applied_dac_volume = -1;
 
-// Dual-button poll + deferred Module-Audio RGB LED (I2C off the hot path).
+// Deferred Module-Audio RGB LED (I2C off the hot path).
+#if defined(USE_DUAL_BUTTON_PORT_A)
 static const uint32_t kDualButtonPollMs = 5;
+#endif
 static const uint32_t kModuleRgbLedDeferMs = 10;
 static TaskHandle_t s_module_led_task = nullptr;
 static volatile uint32_t s_module_led_rgb0 = 0x00FF00;
@@ -451,6 +624,7 @@ static void module_rgb_led_task(void* arg) {
     }
 }
 
+#if defined(USE_DUAL_BUTTON_PORT_A)
 static void dual_button_poll_task(void* arg) {
     (void)arg;
     bool prev_blue = (digitalRead(DUAL_BUTTON_BLUE) == LOW);
@@ -500,6 +674,7 @@ static void dual_button_poll_task(void* arg) {
         vTaskDelay(pdMS_TO_TICKS(kDualButtonPollMs));
     }
 }
+#endif  // USE_DUAL_BUTTON_PORT_A
 
 static void update_bt_status_display() {
     if (!g_bt_state_display_dirty) return;
@@ -1003,11 +1178,13 @@ void setup() {
     M5.Display.println("A2DP queued I2S processing");
     M5.Display.println("");
 
-    // Initialize dual button pins
+#if defined(USE_DUAL_BUTTON_PORT_A)
+    // Initialize dual button pins (PORT.A GPIO). Not used when Joystick2 owns PORT.A.
     pinMode(DUAL_BUTTON_BLUE, INPUT);
     pinMode(DUAL_BUTTON_RED, INPUT);
+#endif
 
-    // Scan I2C bus
+    // Scan system I2C bus (Module Audio / ES8388 on G21/G22)
     ESP_LOGI("main", "Scanning I2C bus...");
     Wire.begin(SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN, 400000L);
     for (int addr = 1; addr < 127; addr++) {
@@ -1018,6 +1195,11 @@ void setup() {
         }
     }
     startup_step("S03", "I2C_scan");
+
+#if defined(DJ_FILTER_CTRL_JOYSTICK2)
+    init_joystick2_porta();
+    startup_step("S03b", "Joystick2_PORTA");
+#endif
 
     // Initialize Module Audio I2C device
     ESP_LOGI("main", "Initializing AudioI2c device...");
@@ -1039,9 +1221,11 @@ void setup() {
     if (xTaskCreatePinnedToCore(module_rgb_led_task, "ModRgbLed", 3072, nullptr, 3, &s_module_led_task, 0) != pdPASS) {
         ESP_LOGE("main", "Failed to create ModRgbLed task");
     }
+#if defined(USE_DUAL_BUTTON_PORT_A)
     if (xTaskCreatePinnedToCore(dual_button_poll_task, "DualBtn", 3072, nullptr, 6, nullptr, 0) != pdPASS) {
         ESP_LOGE("main", "Failed to create DualBtn task");
     }
+#endif
 
     // Core2 onboard speaker/analog pins overlap Module Audio MCLK/I2S; release driver first.
     M5.Speaker.end();
@@ -1226,74 +1410,11 @@ void loop() {
     update_bt_status_display();
     apply_host_volume_to_dac_if_needed();
 
-    // Rotation angle unit (Grove B): drive DJ filter every loop, log/display at 5 Hz.
-    // ESP32 ADC on GPIO36 is inherently noisy; apply (A) 16x oversampling + (B) EMA low-pass
-    // before mapping to v. Knob asymmetric around center, so use piecewise linear mapping.
-    // Going-Zero GUI horizontal slider equivalence:
-    //   knob full left  (mV=ROT_MV_LEFT  =3145) -> v=-1 (LPF heavy)
-    //   knob center     (mV=ROT_MV_CENTER=2100) -> v= 0 (bypass)
-    //   knob full right (mV=ROT_MV_RIGHT = 142) -> v=+1 (HPF heavy)
-    {
-        const int ROT_MV_LEFT = 3145;
-        const int ROT_MV_CENTER = 2100;
-        const int ROT_MV_RIGHT = 142;
-
-        // (A) Oversampling: read N times in a burst and average.
-        const int kOversampleN = 8;
-        int mV_sum = 0;
-        section_start_us = (uint32_t)micros();
-        for (int i = 0; i < kOversampleN; i++) {
-            mV_sum += analogReadMilliVolts(ROTATION_ANGLE_GPIO);
-        }
-        control_stats_note_us(s_control_stats.adc_us_min, s_control_stats.adc_us_max, s_control_stats.adc_us_sum, (uint32_t)micros() - section_start_us);
-        int mV_avg = mV_sum / kOversampleN;
-
-        // (B) EMA low-pass filter: mV_filt = alpha * mV_avg + (1 - alpha) * mV_filt
-        // Higher alpha keeps ADC noise smoothing but reduces knob-to-filter lag.
-        static float s_mV_filt = 0.0f;
-        static bool s_ema_init = false;
-        const float kEmaAlpha = 0.65f;
-        if (!s_ema_init) {
-            s_mV_filt = (float)mV_avg;
-            s_ema_init = true;
-        } else {
-            s_mV_filt = kEmaAlpha * (float)mV_avg + (1.0f - kEmaAlpha) * s_mV_filt;
-        }
-        int mV = (int)s_mV_filt;
-
-        // Track observed min/max of the smoothed readings (calibration aid, serial log)
-        static int s_mV_min = 99999;
-        static int s_mV_max = -1;
-        if (mV < s_mV_min) s_mV_min = mV;
-        if (mV > s_mV_max) s_mV_max = mV;
-
-        // Piecewise linear: separate slopes for the LPF (mV >= center) and HPF (mV < center) halves.
-        float v;
-        if (mV >= ROT_MV_CENTER) {
-            v = -(float)(mV - ROT_MV_CENTER) / (float)(ROT_MV_LEFT - ROT_MV_CENTER);
-        } else {
-            v = (float)(ROT_MV_CENTER - mV) / (float)(ROT_MV_CENTER - ROT_MV_RIGHT);
-        }
-        if (v > 1.0f) v = 1.0f;
-        if (v < -1.0f) v = -1.0f;
-        // Small deadzone so a physical knob near the center reliably hits exact bypass (reset+fade-in path)
-        if (fabsf(v) < 0.03f) v = 0.0f;
-        g_dj_filter_target_value = v;
-
-        static uint32_t last_rotation_dump_ms = 0;
-        uint32_t now_ms = (uint32_t)millis();
-        if (now_ms - last_rotation_dump_ms >= 200) {
-            last_rotation_dump_ms = now_ms;
-            section_start_us = (uint32_t)micros();
-            // mV + filter value line (row 200, yellow)
-            M5.Display.fillRect(0, 200, 320, 20, BLACK);
-            M5.Display.setCursor(0, 200);
-            M5.Display.setTextColor(YELLOW);
-            M5.Display.printf("mV=%4d  v=%+.2f", mV, (double)v);
-            control_stats_note_us(s_control_stats.display_us_min, s_control_stats.display_us_max, s_control_stats.display_us_sum, (uint32_t)micros() - section_start_us);
-            s_control_stats.display_update_count++;
-        }
-    }
+#if defined(DJ_FILTER_CTRL_JOYSTICK2)
+    update_dj_filter_from_joystick2();
+#elif defined(DJ_FILTER_CTRL_ROTATION_ANGLE)
+    update_dj_filter_from_rotation_angle();
+#endif
 
     section_start_us = (uint32_t)micros();
     dump_audio_stats_if_due();
