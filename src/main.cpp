@@ -525,8 +525,8 @@ static void update_dj_filter_from_rotation_angle() {
 static M5UnitJoystick2 g_joystick2;
 static bool g_joystick2_ok = false;
 
-// 12-bit Y offset full-scale used to reach |v|=1 at physical extremes (hall units ~±2k).
-static const int16_t kJoystick2YOffsetFullScale = 2000;
+// 12-bit Y offset full-scale used to reach |v|=1 at physical extremes (~±4096 on this unit).
+static const int16_t kJoystick2YOffsetFullScale = 4096;
 
 // Positive Y offset = stick toward top (UiFlow convention) -> LPF (negative v).
 // Negative Y offset = stick toward bottom -> HPF (positive v).
