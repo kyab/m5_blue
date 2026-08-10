@@ -42,7 +42,10 @@
 #define DUAL_BUTTON_BLUE 33
 #define DUAL_BUTTON_RED 32
 
-// PORT.A Grove I2C (Core2 side): G32=SDA, G33=SCL
+// Core2 + M5Unified I2C mapping (do not invert these):
+//   Wire1 / In_I2C (I2C_NUM_1): G21/G22 — touch/RTC/AXP + Module Audio (M-Bus)
+//   Wire  / Ex_I2C (I2C_NUM_0): G32/G33 — PORT.A Grove (Joystick2)
+// PORT.A Grove: Yellow=G32=SDA, White=G33=SCL
 #define PORT_A_I2C_SDA_PIN 32
 #define PORT_A_I2C_SCL_PIN 33
 
@@ -73,8 +76,8 @@
 // Audio I2C device (for RGB LED, HP detect, etc.)
 AudioI2c device;
 
-// ES8388 codec
-ES8388 es8388(&Wire, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN);
+// ES8388 codec on the internal/M-Bus I2C (Wire1), not PORT.A
+ES8388 es8388(&Wire1, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN);
 
 static const uint32_t kSampleRate = 44100;
 static const uint32_t kStereoChannels = 2;
@@ -532,14 +535,40 @@ static float map_joystick2_y_offset_to_filter_v(int16_t y_offset) {
 }
 
 static bool init_joystick2_porta() {
-    g_joystick2_ok = g_joystick2.begin(&Wire1, JOYSTICK2_ADDR, PORT_A_I2C_SDA_PIN, PORT_A_I2C_SCL_PIN, 400000UL);
+    // M5Unified binds In_I2C to Wire1@21/22 at M5.begin(). PORT.A is Ex_I2C / Wire@32/33.
+    // Using Wire1 here previously failed with "Bus already started" and left pins on 21/22.
+    int sda = M5.getPin(m5::pin_name_t::ex_i2c_sda);
+    int scl = M5.getPin(m5::pin_name_t::ex_i2c_scl);
+    if (sda < 0 || sda >= 255) sda = PORT_A_I2C_SDA_PIN;
+    if (scl < 0 || scl >= 255) scl = PORT_A_I2C_SCL_PIN;
+
+    Wire.end();
+    if (!Wire.begin(sda, scl, 400000L)) {
+        ESP_LOGW("main", "Wire begin failed for PORT.A SDA=%d SCL=%d", sda, scl);
+        g_joystick2_ok = false;
+        g_dj_filter_target_value = 0.0f;
+        M5.Display.setTextColor(YELLOW);
+        M5.Display.println("Joystick2: N/A");
+        return false;
+    }
+
+    ESP_LOGI("main", "Scanning PORT.A I2C (Wire SDA=%d SCL=%d)...", sda, scl);
+    for (int addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            ESP_LOGI("main", "PORT.A found I2C device at address 0x%02X", addr);
+        }
+    }
+
+    // Library begin() re-calls Wire.begin(); with the bus already on PORT.A pins that is a no-op.
+    g_joystick2_ok = g_joystick2.begin(&Wire, JOYSTICK2_ADDR, (uint8_t)sda, (uint8_t)scl, 400000UL);
     if (g_joystick2_ok) {
         ESP_LOGI("main", "Joystick2 OK on PORT.A addr=0x%02X", JOYSTICK2_ADDR);
         g_joystick2.set_rgb_color(0x001000);
         M5.Display.setTextColor(GREEN);
         M5.Display.println("Joystick2: OK");
     } else {
-        ESP_LOGW("main", "Joystick2 not found on PORT.A (SDA=%d SCL=%d)", PORT_A_I2C_SDA_PIN, PORT_A_I2C_SCL_PIN);
+        ESP_LOGW("main", "Joystick2 not found on PORT.A (SDA=%d SCL=%d)", sda, scl);
         M5.Display.setTextColor(YELLOW);
         M5.Display.println("Joystick2: N/A");
         g_dj_filter_target_value = 0.0f;
@@ -1191,12 +1220,13 @@ void setup() {
     pinMode(DUAL_BUTTON_RED, INPUT);
 #endif
 
-    // Scan system I2C bus (Module Audio / ES8388 on G21/G22)
-    ESP_LOGI("main", "Scanning I2C bus...");
-    Wire.begin(SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN, 400000L);
+    // Scan internal I2C (Wire1 / In_I2C): Core2 peripherals + Module Audio on G21/G22.
+    // Do not bind Arduino Wire (I2C0) to 21/22 — that bus is reserved for PORT.A (Ex_I2C).
+    ESP_LOGI("main", "Scanning internal I2C bus (Wire1 SDA=%d SCL=%d)...", SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN);
+    Wire1.begin(SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN, 400000L);
     for (int addr = 1; addr < 127; addr++) {
-        Wire.beginTransmission(addr);
-        uint8_t error = Wire.endTransmission();
+        Wire1.beginTransmission(addr);
+        uint8_t error = Wire1.endTransmission();
         if (error == 0) {
             ESP_LOGI("main", "Found I2C device at address 0x%02X", addr);
         }
@@ -1208,9 +1238,9 @@ void setup() {
     startup_step("S03b", "Joystick2_PORTA");
 #endif
 
-    // Initialize Module Audio I2C device
+    // Initialize Module Audio I2C device (same Wire1 bus as ES8388)
     ESP_LOGI("main", "Initializing AudioI2c device...");
-    if (!device.begin(&Wire, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN)) {
+    if (!device.begin(&Wire1, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN)) {
         ESP_LOGW("main", "AudioI2c device not found");
         M5.Display.setTextColor(YELLOW);
         M5.Display.println("AudioI2c: N/A");
@@ -1270,17 +1300,17 @@ void setup() {
     // DACCONTROL3 (0x19): bit5 = DACSoftRamp, bit1 = DACMute. Hold muted until I2S feeds PCM.
     {
         uint8_t reg25 = 0x00;
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL3);
-        Wire.endTransmission(false);
-        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
-            reg25 = Wire.read();
+        Wire1.beginTransmission(ES8388_ADDR);
+        Wire1.write(ES8388_DACCONTROL3);
+        Wire1.endTransmission(false);
+        if (Wire1.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
+            reg25 = Wire1.read();
         }
         reg25 = (reg25 | 0x20u) | 0x02u;
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL3);
-        Wire.write(reg25);
-        if (Wire.endTransmission() == 0) {
+        Wire1.beginTransmission(ES8388_ADDR);
+        Wire1.write(ES8388_DACCONTROL3);
+        Wire1.write(reg25);
+        if (Wire1.endTransmission() == 0) {
             ESP_LOGI("main", "ES8388 DACCONTROL3=0x%02X (SoftRamp + digital mute)", reg25);
         }
     }
@@ -1290,30 +1320,30 @@ void setup() {
     // leaves mixer paths that leak noise from LIN/RIN into the headphone mix on Module Audio wiring.
     {
         uint8_t reg27 = 0x00;
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL17);
-        Wire.endTransmission(false);
-        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
-            reg27 = Wire.read();
+        Wire1.beginTransmission(ES8388_ADDR);
+        Wire1.write(ES8388_DACCONTROL17);
+        Wire1.endTransmission(false);
+        if (Wire1.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
+            reg27 = Wire1.read();
         }
         uint8_t reg27_new = reg27 & ~0x40u;
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL17);
-        Wire.write(reg27_new);
-        Wire.endTransmission();
+        Wire1.beginTransmission(ES8388_ADDR);
+        Wire1.write(ES8388_DACCONTROL17);
+        Wire1.write(reg27_new);
+        Wire1.endTransmission();
 
         uint8_t reg2a = 0x00;
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL20);
-        Wire.endTransmission(false);
-        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
-            reg2a = Wire.read();
+        Wire1.beginTransmission(ES8388_ADDR);
+        Wire1.write(ES8388_DACCONTROL20);
+        Wire1.endTransmission(false);
+        if (Wire1.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
+            reg2a = Wire1.read();
         }
         uint8_t reg2a_new = reg2a & ~0x40u;
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL20);
-        Wire.write(reg2a_new);
-        Wire.endTransmission();
+        Wire1.beginTransmission(ES8388_ADDR);
+        Wire1.write(ES8388_DACCONTROL20);
+        Wire1.write(reg2a_new);
+        Wire1.endTransmission();
 
         ESP_LOGI("main", "ES8388 DACCONTROL17: 0x%02X -> 0x%02X (LI2LO off)", reg27, reg27_new);
         ESP_LOGI("main", "ES8388 DACCONTROL20: 0x%02X -> 0x%02X (RI2RO off)", reg2a, reg2a_new);
@@ -1348,17 +1378,17 @@ void setup() {
 
     {
         uint8_t reg25 = 0x00;
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL3);
-        Wire.endTransmission(false);
-        if (Wire.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
-            reg25 = Wire.read();
+        Wire1.beginTransmission(ES8388_ADDR);
+        Wire1.write(ES8388_DACCONTROL3);
+        Wire1.endTransmission(false);
+        if (Wire1.requestFrom((uint8_t)ES8388_ADDR, (uint8_t)1) == 1) {
+            reg25 = Wire1.read();
         }
         reg25 = (reg25 & ~0x02u) | 0x20u;
-        Wire.beginTransmission(ES8388_ADDR);
-        Wire.write(ES8388_DACCONTROL3);
-        Wire.write(reg25);
-        if (Wire.endTransmission() == 0) {
+        Wire1.beginTransmission(ES8388_ADDR);
+        Wire1.write(ES8388_DACCONTROL3);
+        Wire1.write(reg25);
+        if (Wire1.endTransmission() == 0) {
             ESP_LOGI("main", "ES8388 DACCONTROL3=0x%02X (SoftRamp, unmuted)", reg25);
         }
     }
