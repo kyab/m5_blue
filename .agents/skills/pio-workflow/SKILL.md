@@ -52,7 +52,7 @@ Omit `-e ${ENV}` only when no `[env:*]` sections exist in `platformio.ini`.
    - Upload: 300000 (includes build + flashing)
    - Monitor: run with `block_until_ms: 0` (background) because it never exits on its own
    - Upload + monitor: run with `block_until_ms: 0` (background) for the same reason
-4. **Monitor handling**: `pio device monitor` is long-running. Start it in the background, then read the terminal file to show recent output. Tell the user how to stop it (`Ctrl+C`, or in the attached monitor `Ctrl+T` then `Q`).
+4. **Monitor handling**: `pio device monitor` is long-running. Start it in the background, then read the terminal file to show recent output. Tell the user how to stop it (`Ctrl+C`, or in the attached monitor `Ctrl+T` then `Q`). To reset the board while monitoring (e.g. to re-capture boot logs), use `Ctrl+T`, `Ctrl+R`, `Ctrl+T`, `Ctrl+R` (toggle RTS twice).
 5. **Port**: Do not hardcode `--upload-port` / `--monitor-port`. Let PlatformIO auto-detect. Only add a port flag if the user explicitly names one or if auto-detection fails.
 6. **After a build failure**: Surface the first compiler error with `file:line`, not the full log dump. Offer to fix it.
 7. **After a successful build/upload**: Briefly report the RAM/Flash usage line if PlatformIO printed it, then ask whether to start the serial monitor (for upload).
