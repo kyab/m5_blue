@@ -527,11 +527,67 @@ static bool g_joystick2_ok = false;
 
 // 12-bit Y offset full-scale used to reach |v|=1 at physical extremes (~±4096 on this unit).
 static const int16_t kJoystick2YOffsetFullScale = 4096;
+// Grove cable + shared PORT.A: 100 kHz is more reliable than 400 kHz (fewer false Z/Y reads).
+static const uint32_t kJoystick2I2cHz = 100000UL;
+static const uint8_t kJoystick2I2cRetries = 3;
 
 // Positive Y offset = stick toward top (UiFlow convention) -> LPF (negative v).
 // Negative Y offset = stick toward bottom -> HPF (positive v).
 static float map_joystick2_y_offset_to_filter_v(int16_t y_offset) {
     return -(float)y_offset / (float)kJoystick2YOffsetFullScale;
+}
+
+// Vendor M5UnitJoystick2::read_bytes ignores Wire errors and can return stale/zero bytes.
+// Use checked transactions with retries so NACK/short reads do not look like real input.
+static bool joystick2_read_bytes(uint8_t reg, uint8_t* buffer, uint8_t length) {
+    Wire.beginTransmission(JOYSTICK2_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) {
+        return false;
+    }
+    uint8_t got = Wire.requestFrom((int)JOYSTICK2_ADDR, (int)length);
+    if (got != length) {
+        return false;
+    }
+    for (uint8_t i = 0; i < length; i++) {
+        int b = Wire.read();
+        if (b < 0) {
+            return false;
+        }
+        buffer[i] = (uint8_t)b;
+    }
+    return true;
+}
+
+static bool joystick2_read_button(uint8_t* button_out) {
+    for (uint8_t attempt = 0; attempt < kJoystick2I2cRetries; attempt++) {
+        uint8_t data = 0xFF;
+        if (!joystick2_read_bytes(JOYSTICK2_BUTTON_REG, &data, 1)) {
+            continue;
+        }
+        // Documented values: 0 = pressed, 1 = released.
+        if (data <= 1) {
+            *button_out = data;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool joystick2_read_y_offset(int16_t* y_out) {
+    for (uint8_t attempt = 0; attempt < kJoystick2I2cRetries; attempt++) {
+        uint8_t data[2] = {0, 0};
+        if (!joystick2_read_bytes((uint8_t)(JOYSTICK2_OFFSET_ADC_VALUE_12BITS_REG + 2), data, 2)) {
+            continue;
+        }
+        int16_t y = (int16_t)(data[0] | ((uint16_t)data[1] << 8));
+        // 12-bit offset is about ±4096; reject wild values from truncated/corrupt transfers.
+        if (y >= -4500 && y <= 4500) {
+            *y_out = y;
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool init_joystick2_porta() {
@@ -543,7 +599,7 @@ static bool init_joystick2_porta() {
     if (scl < 0 || scl >= 255) scl = PORT_A_I2C_SCL_PIN;
 
     Wire.end();
-    if (!Wire.begin(sda, scl, 400000L)) {
+    if (!Wire.begin(sda, scl, (uint32_t)kJoystick2I2cHz)) {
         ESP_LOGW("main", "Wire begin failed for PORT.A SDA=%d SCL=%d", sda, scl);
         g_joystick2_ok = false;
         g_dj_filter_target_value = 0.0f;
@@ -561,7 +617,9 @@ static bool init_joystick2_porta() {
     }
 
     // Library begin() re-calls Wire.begin(); with the bus already on PORT.A pins that is a no-op.
-    g_joystick2_ok = g_joystick2.begin(&Wire, JOYSTICK2_ADDR, (uint8_t)sda, (uint8_t)scl, 400000UL);
+    g_joystick2_ok = g_joystick2.begin(&Wire, JOYSTICK2_ADDR, (uint8_t)sda, (uint8_t)scl, kJoystick2I2cHz);
+    // begin() may restart Wire; keep the slower clock for Grove-cable reliability.
+    Wire.setClock(kJoystick2I2cHz);
     if (g_joystick2_ok) {
         ESP_LOGI("main", "Joystick2 OK on PORT.A addr=0x%02X", JOYSTICK2_ADDR);
         g_joystick2.set_rgb_color(0x001000);
@@ -579,20 +637,59 @@ static bool init_joystick2_porta() {
 // Hold Z (button) and move Y to drive the DJ filter; otherwise force bypass.
 static void update_dj_filter_from_joystick2() {
     float v = 0.0f;
-    uint8_t button = 1;
-    int16_t y_off = 0;
+    // Display / control use filtered values (not raw I2C) so brief bus errors do not flicker UI.
+    static uint8_t s_button = 1;  // 1 = released
+    static int16_t s_y_off = 0;
+    static bool s_z_latched = false;
+    static uint8_t s_z_off_streak = 0;
+    static int16_t s_y_held = 0;
+    static bool s_y_held_valid = false;
+    static const uint8_t kZReleaseConfirm = 12;  // ~24 ms at loop delay(2)
+    static const int16_t kYGlitchAbsPrev = 500;
 
     if (g_joystick2_ok) {
         uint32_t section_start_us = (uint32_t)micros();
-        // Z button: 0 = pressed (ON), 1 = released
-        button = g_joystick2.get_button_value();
-        y_off = g_joystick2.get_joy_adc_12bits_offset_value_y();
+        uint8_t button_raw = s_button;
+        int16_t y_raw = s_y_off;
+        const bool button_ok = joystick2_read_button(&button_raw);
+        const bool y_ok = joystick2_read_y_offset(&y_raw);
         control_stats_note_us(s_control_stats.joystick_read_us_min, s_control_stats.joystick_read_us_max,
                               s_control_stats.joystick_read_us_sum, (uint32_t)micros() - section_start_us);
 
-        const bool z_on = (button == 0);
-        if (z_on) {
-            v = map_joystick2_y_offset_to_filter_v(y_off);
+        if (button_ok) {
+            s_button = button_raw;
+        }
+        if (y_ok) {
+            s_y_off = y_raw;
+        }
+
+        // Debounce Z release: a single false "released" read must not drop the filter to bypass.
+        const bool z_raw = (s_button == 0);
+        if (z_raw) {
+            s_z_off_streak = 0;
+            s_z_latched = true;
+        } else if (s_z_latched) {
+            if (s_z_off_streak < 255) s_z_off_streak++;
+            if (s_z_off_streak >= kZReleaseConfirm) {
+                s_z_latched = false;
+                s_z_off_streak = 0;
+                s_y_held_valid = false;
+                s_y_held = 0;
+            }
+        } else {
+            s_z_off_streak = 0;
+        }
+
+        if (s_z_latched) {
+            // Reject classic I2C glitch: Y snaps to 0 while previously clearly deflected.
+            const bool y_glitch =
+                s_y_held_valid && s_y_off == 0 && (s_y_held > kYGlitchAbsPrev || s_y_held < -kYGlitchAbsPrev);
+            if (!y_glitch) {
+                s_y_held = s_y_off;
+                s_y_held_valid = true;
+            }
+            const int16_t y_used = s_y_held_valid ? s_y_held : s_y_off;
+            v = map_joystick2_y_offset_to_filter_v(y_used);
         }
     }
 
@@ -606,7 +703,8 @@ static void update_dj_filter_from_joystick2() {
         M5.Display.fillRect(0, 200, 320, 20, BLACK);
         M5.Display.setCursor(0, 200);
         M5.Display.setTextColor(YELLOW);
-        M5.Display.printf("Z=%d Y=%+5d v=%+.2f", (button == 0) ? 1 : 0, (int)y_off, (double)v);
+        const int16_t y_show = (s_z_latched && s_y_held_valid) ? s_y_held : s_y_off;
+        M5.Display.printf("Z=%d Y=%+5d v=%+.2f", s_z_latched ? 1 : 0, (int)y_show, (double)v);
         control_stats_note_us(s_control_stats.display_us_min, s_control_stats.display_us_max, s_control_stats.display_us_sum,
                               (uint32_t)micros() - section_start_us);
         s_control_stats.display_update_count++;
