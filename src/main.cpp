@@ -744,13 +744,19 @@ volatile bool g_host_volume_dirty = true;
 volatile bool g_host_volume_received = false;
 volatile bool g_force_silent_output = false;
 
+// LOUT1/ROUT1 volume steps are already dB-linear (1.5 dB/step), so Linear maps the
+// host slider to a straight dB taper. Gamma exponents below 1.0 lift the middle of
+// the range; exponents above 1.0 (and ExpK3) push it down.
 enum class DacVolumeCurve {
     Linear,
+    Gamma05,
+    Gamma033,
+    Gamma025,
     Gamma16,
     ExpK3,
 };
 
-static DacVolumeCurve s_dac_volume_curve = DacVolumeCurve::Linear;
+static DacVolumeCurve s_dac_volume_curve = DacVolumeCurve::Gamma033;
 static int s_last_applied_dac_volume = -1;
 
 // Deferred Module-Audio RGB LED (I2C off the hot path).
@@ -1258,6 +1264,15 @@ static int map_host_volume_to_dac(int host_volume_127) {
     switch (s_dac_volume_curve) {
         case DacVolumeCurve::Linear:
             mapped = x;
+            break;
+        case DacVolumeCurve::Gamma05:
+            mapped = sqrtf(x);
+            break;
+        case DacVolumeCurve::Gamma033:
+            mapped = powf(x, 1.0f / 3.0f);
+            break;
+        case DacVolumeCurve::Gamma025:
+            mapped = powf(x, 0.25f);
             break;
         case DacVolumeCurve::Gamma16:
             mapped = powf(x, 1.6f);
