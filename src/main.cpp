@@ -649,8 +649,11 @@ static void update_dj_filter_from_joystick2() {
     static uint8_t s_z_release_count = 0;
     static int16_t s_y_held = 0;
     static bool s_y_held_valid = false;
+    static uint8_t s_y_zero_confirm = 0;
     static const uint8_t kZReleaseConfirm = 12;  // ~24 ms at loop delay(2)
     static const int16_t kYGlitchAbsPrev = 500;
+    // Single-sample I2C zeros are rejected; sustained zeros are accepted as real center (~8 ms).
+    static const uint8_t kYZeroConfirm = 4;
 
     if (g_joystick2_ok) {
         uint32_t section_start_us = (uint32_t)micros();
@@ -684,10 +687,21 @@ static void update_dj_filter_from_joystick2() {
             s_z_release_count = 0;
         }
 
-        // Reject classic I2C glitch: Y snaps to 0 while previously clearly deflected.
-        const bool y_glitch =
+        // Reject classic I2C glitch (one-shot Y==0 while clearly deflected), but if Y stays 0
+        // for kYZeroConfirm successful reads, treat it as a real snap-back to center.
+        const bool y_sudden_zero =
             s_y_held_valid && s_y == 0 && (s_y_held > kYGlitchAbsPrev || s_y_held < -kYGlitchAbsPrev);
-        if (!y_glitch) {
+        if (y_sudden_zero) {
+            if (y_ok && s_y_zero_confirm < 255) {
+                s_y_zero_confirm++;
+            }
+            if (s_y_zero_confirm >= kYZeroConfirm) {
+                s_y_held = 0;
+                s_y_held_valid = true;
+                s_y_zero_confirm = 0;
+            }
+        } else {
+            s_y_zero_confirm = 0;
             s_y_held = s_y;
             s_y_held_valid = true;
         }
