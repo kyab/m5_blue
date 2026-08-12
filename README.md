@@ -5,6 +5,12 @@ https://note.com/leftbank/n/n6aadbf1f9b11
 
 ### Default app (A2DP + DJ filter, from `src/main.cpp`)
 
+DJ filter control defaults to **Unit Joystick2** on Core2 **PORT.A** (I2C G32/G33):
+move the Y axis (top = LPF, center = bypass, bottom = HPF). Z is still read/debounced
+but does not gate the filter.
+To restore the older Rotation angle unit (U005) on PORT.B, switch the defines in
+`src/main.cpp` (`DJ_FILTER_CTRL_ROTATION_ANGLE` instead of `DJ_FILTER_CTRL_JOYSTICK2`).
+
 ```sh
 pio run
 pio run -t upload
