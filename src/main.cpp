@@ -50,7 +50,7 @@
 #define PORT_A_I2C_SCL_PIN 33
 
 // DJ filter control source — enable exactly one.
-//   DJ_FILTER_CTRL_JOYSTICK2      : Unit Joystick2 on PORT.A (I2C @0x63). Hold Z and move Y.
+//   DJ_FILTER_CTRL_JOYSTICK2      : Unit Joystick2 on PORT.A (I2C @0x63). Y axis drives the filter.
 //   DJ_FILTER_CTRL_ROTATION_ANGLE : Rotation angle unit (M5STACK-U005) on PORT.B (G36 ADC).
 #define DJ_FILTER_CTRL_JOYSTICK2 1
 // #define DJ_FILTER_CTRL_ROTATION_ANGLE 1
@@ -525,8 +525,10 @@ static void update_dj_filter_from_rotation_angle() {
 static M5UnitJoystick2 g_joystick2;
 static bool g_joystick2_ok = false;
 
-// 12-bit Y offset full-scale used to reach |v|=1 at physical extremes (~±4096 on this unit).
+// 12-bit Y offset full-scale (~±4096): asymmetric |v| at physical extremes.
 static const int16_t kJoystick2YOffsetFullScale = 4096;
+static const float kJoystick2FilterVLpfMax = 0.86f;  // positive offset -> negative v
+static const float kJoystick2FilterVHpfMax = 0.95f;  // negative offset -> positive v
 // Grove cable + shared PORT.A: 100 kHz is more reliable than 400 kHz (fewer false Z/Y reads).
 static const uint32_t kJoystick2I2cHz = 100000UL;
 static const uint8_t kJoystick2I2cRetries = 3;
@@ -534,7 +536,10 @@ static const uint8_t kJoystick2I2cRetries = 3;
 // Positive Y offset = stick toward top (UiFlow convention) -> LPF (negative v).
 // Negative Y offset = stick toward bottom -> HPF (positive v).
 static float map_joystick2_y_offset_to_filter_v(int16_t y_offset) {
-    return -(float)y_offset / (float)kJoystick2YOffsetFullScale;
+    if (y_offset >= 0) {
+        return -(float)y_offset / (float)kJoystick2YOffsetFullScale * kJoystick2FilterVLpfMax;
+    }
+    return -(float)(y_offset) / (float)kJoystick2YOffsetFullScale* kJoystick2FilterVHpfMax;
 }
 
 // Vendor M5UnitJoystick2::read_bytes ignores Wire errors and can return stale/zero bytes.
@@ -590,7 +595,7 @@ static bool joystick2_read_y_offset(int16_t* y_out) {
     return false;
 }
 
-static bool init_joystick2_porta() {
+static bool init_joystick2_portA() {
     // M5Unified binds In_I2C to Wire1@21/22 at M5.begin(). PORT.A is Ex_I2C / Wire@32/33.
     // Using Wire1 here previously failed with "Bus already started" and left pins on 21/22.
     int sda = M5.getPin(m5::pin_name_t::ex_i2c_sda);
@@ -634,14 +639,14 @@ static bool init_joystick2_porta() {
     return g_joystick2_ok;
 }
 
-// Hold Z (button) and move Y to drive the DJ filter; otherwise force bypass.
+// Y axis drives the DJ filter. Z is still read and debounced (for UI / future use) but does not gate the filter.
 static void update_dj_filter_from_joystick2() {
     float v = 0.0f;
     // Display / control use filtered values (not raw I2C) so brief bus errors do not flicker UI.
     static uint8_t s_button = 1;  // 1 = released
-    static int16_t s_y_off = 0;
+    static int16_t s_y = 0;
     static bool s_z_latched = false;
-    static uint8_t s_z_off_streak = 0;
+    static uint8_t s_z_release_count = 0;
     static int16_t s_y_held = 0;
     static bool s_y_held_valid = false;
     static const uint8_t kZReleaseConfirm = 12;  // ~24 ms at loop delay(2)
@@ -650,7 +655,7 @@ static void update_dj_filter_from_joystick2() {
     if (g_joystick2_ok) {
         uint32_t section_start_us = (uint32_t)micros();
         uint8_t button_raw = s_button;
-        int16_t y_raw = s_y_off;
+        int16_t y_raw = s_y;
         const bool button_ok = joystick2_read_button(&button_raw);
         const bool y_ok = joystick2_read_y_offset(&y_raw);
         control_stats_note_us(s_control_stats.joystick_read_us_min, s_control_stats.joystick_read_us_max,
@@ -660,37 +665,34 @@ static void update_dj_filter_from_joystick2() {
             s_button = button_raw;
         }
         if (y_ok) {
-            s_y_off = y_raw;
+            s_y = y_raw;
         }
 
-        // Debounce Z release: a single false "released" read must not drop the filter to bypass.
+        // Debounce Z (button): keep latched state stable despite brief I2C false releases.
+        // Z no longer affects the DJ filter target; latch is for display / future use only.
         const bool z_raw = (s_button == 0);
         if (z_raw) {
-            s_z_off_streak = 0;
+            s_z_release_count = 0;
             s_z_latched = true;
         } else if (s_z_latched) {
-            if (s_z_off_streak < 255) s_z_off_streak++;
-            if (s_z_off_streak >= kZReleaseConfirm) {
+            if (s_z_release_count < 255) s_z_release_count++;
+            if (s_z_release_count >= kZReleaseConfirm) {
                 s_z_latched = false;
-                s_z_off_streak = 0;
-                s_y_held_valid = false;
-                s_y_held = 0;
+                s_z_release_count = 0;
             }
         } else {
-            s_z_off_streak = 0;
+            s_z_release_count = 0;
         }
 
-        if (s_z_latched) {
-            // Reject classic I2C glitch: Y snaps to 0 while previously clearly deflected.
-            const bool y_glitch =
-                s_y_held_valid && s_y_off == 0 && (s_y_held > kYGlitchAbsPrev || s_y_held < -kYGlitchAbsPrev);
-            if (!y_glitch) {
-                s_y_held = s_y_off;
-                s_y_held_valid = true;
-            }
-            const int16_t y_used = s_y_held_valid ? s_y_held : s_y_off;
-            v = map_joystick2_y_offset_to_filter_v(y_used);
+        // Reject classic I2C glitch: Y snaps to 0 while previously clearly deflected.
+        const bool y_glitch =
+            s_y_held_valid && s_y == 0 && (s_y_held > kYGlitchAbsPrev || s_y_held < -kYGlitchAbsPrev);
+        if (!y_glitch) {
+            s_y_held = s_y;
+            s_y_held_valid = true;
         }
+        const int16_t y_used = s_y_held_valid ? s_y_held : s_y;
+        v = map_joystick2_y_offset_to_filter_v(y_used);
     }
 
     v = apply_dj_filter_target_value(v);
@@ -703,7 +705,7 @@ static void update_dj_filter_from_joystick2() {
         M5.Display.fillRect(0, 200, 320, 20, BLACK);
         M5.Display.setCursor(0, 200);
         M5.Display.setTextColor(YELLOW);
-        const int16_t y_show = (s_z_latched && s_y_held_valid) ? s_y_held : s_y_off;
+        const int16_t y_show = s_y_held_valid ? s_y_held : s_y;
         M5.Display.printf("Z=%d Y=%+5d v=%+.2f", s_z_latched ? 1 : 0, (int)y_show, (double)v);
         control_stats_note_us(s_control_stats.display_us_min, s_control_stats.display_us_max, s_control_stats.display_us_sum,
                               (uint32_t)micros() - section_start_us);
@@ -1332,7 +1334,7 @@ void setup() {
     startup_step("S03", "I2C_scan");
 
 #if defined(DJ_FILTER_CTRL_JOYSTICK2)
-    init_joystick2_porta();
+    init_joystick2_portA();
     startup_step("S03b", "Joystick2_PORTA");
 #endif
 
