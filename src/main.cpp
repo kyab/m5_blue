@@ -527,19 +527,19 @@ static bool g_joystick2_ok = false;
 
 // 12-bit Y offset full-scale (~±4096): asymmetric |v| at physical extremes.
 static const int16_t kJoystick2YOffsetFullScale = 4096;
-static const float kJoystick2FilterVLpfMax = 0.86f;  // positive offset -> negative v
-static const float kJoystick2FilterVHpfMax = 0.95f;  // negative offset -> positive v
+static const float kJoystick2FilterVLpfMax = 0.86f;
+static const float kJoystick2FilterVHpfMax = 0.95f;
 // Grove cable + shared PORT.A: 100 kHz is more reliable than 400 kHz (fewer false Z/Y reads).
 static const uint32_t kJoystick2I2cHz = 100000UL;
 static const uint8_t kJoystick2I2cRetries = 3;
 
-// Positive Y offset = stick toward top (UiFlow convention) -> LPF (negative v).
-// Negative Y offset = stick toward bottom -> HPF (positive v).
+// Positive Y offset = stick toward top (Cable side) -> HPF (positive v)
+// Negative Y offset = stick toward bottom -> LPF (negative v).
 static float map_joystick2_y_offset_to_filter_v(int16_t y_offset) {
     if (y_offset >= 0) {
-        return -(float)y_offset / (float)kJoystick2YOffsetFullScale * kJoystick2FilterVLpfMax;
+        return (float)y_offset / (float)kJoystick2YOffsetFullScale * kJoystick2FilterVHpfMax;
     }
-    return -(float)(y_offset) / (float)kJoystick2YOffsetFullScale* kJoystick2FilterVHpfMax;
+    return (float)(y_offset) / (float)kJoystick2YOffsetFullScale * kJoystick2FilterVLpfMax;
 }
 
 // Vendor M5UnitJoystick2::read_bytes ignores Wire errors and can return stale/zero bytes.
