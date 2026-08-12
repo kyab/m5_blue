@@ -7,6 +7,7 @@
 #include "BluetoothA2DPSink.h"
 #include "RingBuffer.hpp"
 #include "DJFilter.hpp"
+#include "esp_gap_bt_api.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -422,6 +423,28 @@ protected:
             // Keep I2S running on remote pause/stop to avoid DAC stop/start pops.
             ESP_LOGI("a2dp", "ignore set_i2s_active(false): keep I2S active");
         }
+    }
+
+    // Change CoD minor after A2DP init so the host shows a headphone icon.
+    void av_hdl_a2d_evt(uint16_t event, void* p_param) override {
+        BluetoothA2DPSink::av_hdl_a2d_evt(event, p_param);
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 0, 0)
+        if (event != ESP_A2D_PROF_STATE_EVT || p_param == nullptr) {
+            return;
+        }
+        const auto* a2d = static_cast<const esp_a2d_cb_param_t*>(p_param);
+        if (a2d->a2d_prof_stat.init_state != ESP_A2D_INIT_SUCCESS) {
+            return;
+        }
+        esp_bt_cod_t cod = {};
+        cod.major = ESP_BT_COD_MAJOR_DEV_AV;
+        cod.minor = 0x06;  // Headphones
+        cod.service = ESP_BT_COD_SRVC_AUDIO | ESP_BT_COD_SRVC_RENDERING;
+        esp_err_t err = esp_bt_gap_set_cod(cod, ESP_BT_INIT_COD);
+        if (err != ESP_OK) {
+            ESP_LOGW("a2dp", "esp_bt_gap_set_cod failed: %s", esp_err_to_name(err));
+        }
+#endif
     }
 };
 
