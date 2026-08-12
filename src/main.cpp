@@ -5,6 +5,7 @@
 #include "es8388.hpp"
 #include "AudioTools.h"
 #include "BluetoothA2DPSink.h"
+#include "esp_a2dp_api.h"
 #include "RingBuffer.hpp"
 #include "DJFilter.hpp"
 #include "esp_random.h"
@@ -1319,6 +1320,20 @@ static void apply_host_volume_to_dac_if_needed() {
     g_host_volume_dirty = false;
 }
 
+// AVDTP delay report unit is 1/10 ms; 5000 => 500 ms (trial; Bluedroid minimum is often 120 ms).
+static constexpr uint16_t kTrialA2dpDelayReportTenthsMs = 5000;
+
+// Early call before BluetoothA2DPSink::start(): stack is usually not ready, so expect
+// ESP_ERR_INVALID_STATE. ESP32-A2DP will call esp_a2d_sink_init() again after Bluedroid is up.
+static void trial_early_a2dp_sink_delay_report_500ms() {
+    ESP_LOGI("main", "trial: early esp_a2d_sink_init() + esp_a2d_sink_set_delay_value(%u) (1/10 ms units)",
+             (unsigned)kTrialA2dpDelayReportTenthsMs);
+    esp_err_t init_err = esp_a2d_sink_init();
+    esp_err_t delay_err = esp_a2d_sink_set_delay_value(kTrialA2dpDelayReportTenthsMs);
+    ESP_LOGI("main", "trial: esp_a2d_sink_init -> %s (%d), esp_a2d_sink_set_delay_value -> %s (%d)",
+             esp_err_to_name(init_err), (int)init_err, esp_err_to_name(delay_err), (int)delay_err);
+}
+
 void setup() {
     // Initialize M5Unified
     auto cfg = M5.config();
@@ -1332,6 +1347,9 @@ void setup() {
     esp_log_level_set("*", ESP_LOG_INFO);
     // AVRCP absolute-volume logging is demoted to ESP_LOGD in the ESP32-A2DP submodule; BT_AV WARN is an extra guard.
     esp_log_level_set("BT_AV", ESP_LOG_WARN);
+
+    trial_early_a2dp_sink_delay_report_500ms();
+    startup_step("S02b", "A2DP_delay_trial_early");
 
     ESP_LOGI("main", "=== Phase 3: BT + Module Audio (I2SStream approach) ===");
     ESP_LOGI("main", "Available Heap: %zu", esp_get_free_heap_size());

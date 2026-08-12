@@ -102,10 +102,10 @@ static const char* segment_name(Segment s) {
     return "?";
 }
 
-// Globals
+// Globals (avoid name g_i2s: ESP-IDF 5.x i2s_common.c defines a global with that symbol)
 AudioI2c g_device;
 ES8388 g_es8388(&Wire, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN);
-I2SStream g_i2s;
+I2SStream g_i2s_stream;
 
 static int16_t g_block[kBlockSamples * 2];  // stereo
 static double g_phase = 0.0;                // carry sine phase across blocks to avoid clicks
@@ -365,15 +365,15 @@ void setup() {
     M5.Speaker.end();
 
     // I2S setup
-    g_i2s.end();
-    auto i2s_cfg = g_i2s.defaultConfig();
+    g_i2s_stream.end();
+    auto i2s_cfg = g_i2s_stream.defaultConfig();
     i2s_cfg.sample_rate = kSampleRate;
     i2s_cfg.channels = 2;
     i2s_cfg.bits_per_sample = 16;
     i2s_cfg.pin_bck = SYS_I2S_SCLK_PIN;
     i2s_cfg.pin_ws = SYS_I2S_LRCK_PIN;
     i2s_cfg.pin_data = SYS_I2S_DOUT_PIN;
-    g_i2s.begin(i2s_cfg);
+    g_i2s_stream.begin(i2s_cfg);
     Serial.printf("[i2s] started: fs=%u BCK=%d WS=%d DATA=%d\n",
                   (unsigned)kSampleRate, SYS_I2S_SCLK_PIN, SYS_I2S_LRCK_PIN, SYS_I2S_DOUT_PIN);
 
@@ -434,7 +434,7 @@ void loop() {
             case SEG_COUNT:
                 break;
             }
-            g_i2s.write(reinterpret_cast<const uint8_t*>(g_block), sizeof(g_block));
+            g_i2s_stream.write(reinterpret_cast<const uint8_t*>(g_block), sizeof(g_block));
             if (seg == SEG_ZERO && b == mid_block) {
                 dump_es8388_regs("ZERO-mid");
             }
