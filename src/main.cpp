@@ -86,11 +86,11 @@ static const uint32_t kStereoChannels = 2;
 // I2SStream for audio output (fed by a single writer task)
 I2SStream i2s;
 
-static const uint32_t kI2SWriterFrames = 256;       // ~5.8 ms at 44.1 kHz; caps resume latency
+static const uint32_t kI2SWriterFrames = 256; // ~5.8 ms at 44.1 kHz; caps resume latency
 static const size_t kI2SWriterBytes = kI2SWriterFrames * kStereoChannels * sizeof(int16_t);
-static const size_t kBtPcmRingBytes = 32768;        // ~186 ms stereo 16-bit queue; absorbs A2DP burst jitter
-static const size_t kBtPcmPrebufferBytes = 24576;   // ~139 ms: resume into the stable high-water region
-static const uint32_t kBtPcmPushWaitMs = 20;        // Restore bounded back-pressure before dropping PCM
+static const size_t kBtPcmRingBytes = 32768;      // ~186 ms stereo 16-bit queue; absorbs A2DP burst jitter
+static const size_t kBtPcmPrebufferBytes = 24576; // ~139 ms: resume into the stable high-water region
+static const uint32_t kBtPcmPushWaitMs = 20;      // Restore bounded back-pressure before dropping PCM
 static uint8_t s_bt_pcm_ring[kBtPcmRingBytes];
 static size_t s_bt_pcm_head = 0;
 static size_t s_bt_pcm_tail = 0;
@@ -170,8 +170,10 @@ static void stats_note_ring_drop(size_t bytes) {
 
 static void stats_note_writer(bool pcm_block, bool rebuffered, uint32_t write_us) {
     portENTER_CRITICAL(&s_audio_stats_mux);
-    if (pcm_block) s_audio_stats.writer_pcm_blocks++;
-    else s_audio_stats.writer_dither_blocks++;
+    if (pcm_block)
+        s_audio_stats.writer_pcm_blocks++;
+    else
+        s_audio_stats.writer_dither_blocks++;
     if (rebuffered) s_audio_stats.writer_rebuffer_count++;
     s_audio_stats.writer_write_count++;
     s_audio_stats.writer_write_us_sum += write_us;
@@ -392,7 +394,7 @@ static void bt_pcm_ring_clear() {
 }
 
 class BluetoothA2DPOutputQueuedI2S : public BluetoothA2DPOutput {
-public:
+  public:
     bool begin() override { return true; }
     void end() override {}
     void set_sample_rate(int rate) override {
@@ -412,10 +414,10 @@ public:
 static BluetoothA2DPOutputQueuedI2S a2dp_output;
 
 class BluetoothA2DPSinkKeepI2S : public BluetoothA2DPSink {
-public:
+  public:
     using BluetoothA2DPSink::BluetoothA2DPSink;
 
-protected:
+  protected:
     void set_i2s_active(bool active) override {
         if (active) {
             BluetoothA2DPSink::set_i2s_active(true);
@@ -438,7 +440,7 @@ protected:
         }
         esp_bt_cod_t cod = {};
         cod.major = ESP_BT_COD_MAJOR_DEV_AV;
-        cod.minor = 0x06;  // Headphones
+        cod.minor = 0x06; // Headphones
         cod.service = ESP_BT_COD_SRVC_AUDIO | ESP_BT_COD_SRVC_RENDERING;
         esp_err_t err = esp_bt_gap_set_cod(cod, ESP_BT_INIT_COD);
         if (err != ESP_OK) {
@@ -542,27 +544,58 @@ static void update_dj_filter_from_rotation_angle() {
         s_control_stats.display_update_count++;
     }
 }
-#endif  // DJ_FILTER_CTRL_ROTATION_ANGLE
+#endif // DJ_FILTER_CTRL_ROTATION_ANGLE
 
 #if defined(DJ_FILTER_CTRL_JOYSTICK2)
 static M5UnitJoystick2 g_joystick2;
 static bool g_joystick2_ok = false;
 
-// 12-bit Y offset full-scale (~±4096): asymmetric |v| at physical extremes.
+// 12-bit Y offset full-scale (~±4096).
 static const int16_t kJoystick2YOffsetFullScale = 4096;
-static const float kJoystick2FilterVLpfMax = 0.86f;
-static const float kJoystick2FilterVHpfMax = 0.95f;
+
+// Joystick2 Y -> DJFilter v. Linear map; tune these on device by ear / feel.
+// Input y_offset is typically in [-4096, +4096], center = 0.
+// Positive Y (cable side) -> HPF (v > 0). Negative Y -> LPF (v < 0).
+// Inclusive deadband: returns 0 for kJoystick2YDeadbandNeg <= y <= kJoystick2YDeadbandPos.
+// Linear map starts at the next integer outside the deadband:
+//   y = deadband_pos+1 -> kJoystick2FilterVHPFMin,  y = +4096 -> kJoystick2FilterVHPFMax
+//   y = deadband_neg-1 -> kJoystick2FilterVLPFMin,  y = -4096 -> kJoystick2FilterVLPFMax
+// HPF constants are positive v; LPF constants are negative v.
+static const int16_t kJoystick2YDeadbandPos = 30;    // tune: +Y deadband end (inclusive)
+static const int16_t kJoystick2YDeadbandNeg = -30;   // tune: -Y deadband end (inclusive, <= 0)
+static const float kJoystick2FilterVHPFMin = 0.55f;  // tune: HPF v at linear-map start (>= 0)
+static const float kJoystick2FilterVHPFMax = 0.99f;  // tune: HPF v at +full-scale (>= 0)
+static const float kJoystick2FilterVLPFMin = -0.10f; // tune: LPF v at linear-map start (<= 0)
+static const float kJoystick2FilterVLPFMax = -0.86f; // tune: LPF v at -full-scale (<= 0)
+
 // Grove cable + shared PORT.A: 100 kHz is more reliable than 400 kHz (fewer false Z/Y reads).
 static const uint32_t kJoystick2I2cHz = 100000UL;
 static const uint8_t kJoystick2I2cRetries = 3;
 
-// Positive Y offset = stick toward top (Cable side) -> HPF (positive v)
-// Negative Y offset = stick toward bottom -> LPF (negative v).
-static float map_joystick2_y_offset_to_filter_v(int16_t y_offset) {
-    if (y_offset >= 0) {
-        return (float)y_offset / (float)kJoystick2YOffsetFullScale * kJoystick2FilterVHpfMax;
+static float map_joystick2_linear(int16_t y, int16_t y_start, int16_t y_end, float v_start, float v_end) {
+    const int32_t span = (int32_t)y_end - (int32_t)y_start;
+    if (span == 0) {
+        return v_end;
     }
-    return (float)(y_offset) / (float)kJoystick2YOffsetFullScale * kJoystick2FilterVLpfMax;
+    float t = (float)((int32_t)y - (int32_t)y_start) / (float)span;
+    if (t < 0.0f) {
+        t = 0.0f;
+    } else if (t > 1.0f) {
+        t = 1.0f;
+    }
+    return v_start + t * (v_end - v_start);
+}
+
+static float map_joystick2_y_offset_to_filter_v(int16_t y_offset) {
+    if (y_offset > kJoystick2YDeadbandPos) {
+        const int16_t y_start = (int16_t)(kJoystick2YDeadbandPos + 1);
+        return map_joystick2_linear(y_offset, y_start, kJoystick2YOffsetFullScale, kJoystick2FilterVHPFMin, kJoystick2FilterVHPFMax);
+    }
+    if (y_offset < kJoystick2YDeadbandNeg) {
+        const int16_t y_start = (int16_t)(kJoystick2YDeadbandNeg - 1);
+        return map_joystick2_linear(y_offset, y_start, (int16_t)(-kJoystick2YOffsetFullScale), kJoystick2FilterVLPFMin, kJoystick2FilterVLPFMax);
+    }
+    return 0.0f;
 }
 
 // Vendor M5UnitJoystick2::read_bytes ignores Wire errors and can return stale/zero bytes.
@@ -666,14 +699,14 @@ static bool init_joystick2_portA() {
 static void update_dj_filter_from_joystick2() {
     float v = 0.0f;
     // Display / control use filtered values (not raw I2C) so brief bus errors do not flicker UI.
-    static uint8_t s_button = 1;  // 1 = released
+    static uint8_t s_button = 1; // 1 = released
     static int16_t s_y = 0;
     static bool s_z_latched = false;
     static uint8_t s_z_release_count = 0;
     static int16_t s_y_held = 0;
     static bool s_y_held_valid = false;
     static uint8_t s_y_zero_confirm = 0;
-    static const uint8_t kZReleaseConfirm = 12;  // ~24 ms at loop delay(2)
+    static const uint8_t kZReleaseConfirm = 12; // ~24 ms at loop delay(2)
     static const int16_t kYGlitchAbsPrev = 500;
     // Single-sample I2C zeros are rejected; sustained zeros are accepted as real center (~8 ms).
     static const uint8_t kYZeroConfirm = 4;
@@ -749,14 +782,14 @@ static void update_dj_filter_from_joystick2() {
         s_control_stats.display_update_count++;
     }
 }
-#endif  // DJ_FILTER_CTRL_JOYSTICK2
+#endif // DJ_FILTER_CTRL_JOYSTICK2
 
 // When the A2DP source sends long runs of digital silence (pause, track gap, app mute),
 // some DAC paths treat "all zero" PCM as an idle state and create audible clicks at
 // resume. If a block's peak is below this threshold, mix in sub-audible TPDF dither
 // so the I2S stream never stays stuck at exact zero.
-static const int32_t kSilenceDitherPeakThreshold = 16;  // |int16| peak per block
-static const int32_t kSilenceDitherLsbScale = 2;        // ~2 LSB RMS; >>15 after TPDF
+static const int32_t kSilenceDitherPeakThreshold = 16; // |int16| peak per block
+static const int32_t kSilenceDitherLsbScale = 2;       // ~2 LSB RMS; >>15 after TPDF
 
 volatile esp_a2d_connection_state_t g_bt_connection_state = ESP_A2D_CONNECTION_STATE_DISCONNECTED;
 volatile esp_a2d_audio_state_t g_a2dp_audio_state = ESP_A2D_AUDIO_STATE_STOPPED;
@@ -853,7 +886,7 @@ static void dual_button_poll_task(void* arg) {
         vTaskDelay(pdMS_TO_TICKS(kDualButtonPollMs));
     }
 }
-#endif  // USE_DUAL_BUTTON_PORT_A
+#endif // USE_DUAL_BUTTON_PORT_A
 
 static void update_bt_status_display() {
     if (!g_bt_state_display_dirty) return;
@@ -916,10 +949,14 @@ static void add_silence_dither_if_needed(int16_t* data, uint32_t frame_count) {
     for (uint32_t i = 0; i < frame_count; i++) {
         int32_t nl = (int32_t)data[i * 2] + make_tpdf_dither_sample();
         int32_t nr = (int32_t)data[i * 2 + 1] + make_tpdf_dither_sample();
-        if (nl > 32767) nl = 32767;
-        else if (nl < -32768) nl = -32768;
-        if (nr > 32767) nr = 32767;
-        else if (nr < -32768) nr = -32768;
+        if (nl > 32767)
+            nl = 32767;
+        else if (nl < -32768)
+            nl = -32768;
+        if (nr > 32767)
+            nr = 32767;
+        else if (nr < -32768)
+            nr = -32768;
         data[i * 2] = static_cast<int16_t>(nl);
         data[i * 2 + 1] = static_cast<int16_t>(nr);
     }
@@ -931,8 +968,10 @@ static const uint32_t kFreezerDefaultGrainSamples = 2000;
 
 static int16_t fz_scale_i16(int16_t s, float rate) {
     int32_t v = (int32_t)lroundf((float)s * rate);
-    if (v > 32767) v = 32767;
-    else if (v < -32768) v = -32768;
+    if (v > 32767)
+        v = 32767;
+    else if (v < -32768)
+        v = -32768;
     return static_cast<int16_t>(v);
 }
 
@@ -1121,10 +1160,14 @@ static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool f
         for (uint32_t i = 0; i < n; i++) {
             float l = s_dj_left[i] * 32768.0f;
             float r = s_dj_right[i] * 32768.0f;
-            if (l > 32767.0f) l = 32767.0f;
-            else if (l < -32768.0f) l = -32768.0f;
-            if (r > 32767.0f) r = 32767.0f;
-            else if (r < -32768.0f) r = -32768.0f;
+            if (l > 32767.0f)
+                l = 32767.0f;
+            else if (l < -32768.0f)
+                l = -32768.0f;
+            if (r > 32767.0f)
+                r = 32767.0f;
+            else if (r < -32768.0f)
+                r = -32768.0f;
             data[i * 2] = static_cast<int16_t>(l);
             data[i * 2 + 1] = static_cast<int16_t>(r);
         }
@@ -1200,10 +1243,14 @@ static void i2s_writer_task(void* arg) {
                                 (1.0f - t) * (float)s_bt_prev_tail_R + t * (float)pcm[fi * kStereoChannels + 1U];
                             int32_t il = (int32_t)lroundf(fl);
                             int32_t ir = (int32_t)lroundf(fr);
-                            if (il > 32767) il = 32767;
-                            else if (il < -32768) il = -32768;
-                            if (ir > 32767) ir = 32767;
-                            else if (ir < -32768) ir = -32768;
+                            if (il > 32767)
+                                il = 32767;
+                            else if (il < -32768)
+                                il = -32768;
+                            if (ir > 32767)
+                                ir = 32767;
+                            else if (ir < -32768)
+                                ir = -32768;
                             pcm[fi * kStereoChannels] = static_cast<int16_t>(il);
                             pcm[fi * kStereoChannels + 1U] = static_cast<int16_t>(ir);
                         }
@@ -1266,7 +1313,6 @@ void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
     } else {
         ESP_LOGI("main", "A2DP connected: waiting for host volume event before raising DAC volume");
     }
-
 }
 
 void a2dp_audio_state_callback(esp_a2d_audio_state_t state, void* obj) {
@@ -1285,27 +1331,27 @@ static int map_host_volume_to_dac(int host_volume_127) {
     float x = (float)host_volume_127 / 127.0f;
     float mapped = 0.0f;
     switch (s_dac_volume_curve) {
-        case DacVolumeCurve::Linear:
-            mapped = x;
-            break;
-        case DacVolumeCurve::Gamma05:
-            mapped = sqrtf(x);
-            break;
-        case DacVolumeCurve::Gamma033:
-            mapped = powf(x, 1.0f / 3.0f);
-            break;
-        case DacVolumeCurve::Gamma025:
-            mapped = powf(x, 0.25f);
-            break;
-        case DacVolumeCurve::Gamma16:
-            mapped = powf(x, 1.6f);
-            break;
-        case DacVolumeCurve::ExpK3:
-            mapped = (expf(3.0f * x) - 1.0f) / (expf(3.0f) - 1.0f);
-            break;
-        default:
-            mapped = x;
-            break;
+    case DacVolumeCurve::Linear:
+        mapped = x;
+        break;
+    case DacVolumeCurve::Gamma05:
+        mapped = sqrtf(x);
+        break;
+    case DacVolumeCurve::Gamma033:
+        mapped = powf(x, 1.0f / 3.0f);
+        break;
+    case DacVolumeCurve::Gamma025:
+        mapped = powf(x, 0.25f);
+        break;
+    case DacVolumeCurve::Gamma16:
+        mapped = powf(x, 1.6f);
+        break;
+    case DacVolumeCurve::ExpK3:
+        mapped = (expf(3.0f * x) - 1.0f) / (expf(3.0f) - 1.0f);
+        break;
+    default:
+        mapped = x;
+        break;
     }
     int dac_volume = (int)lroundf(100.0f * mapped);
     if (dac_volume < 0) dac_volume = 0;
