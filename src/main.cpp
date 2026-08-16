@@ -479,6 +479,13 @@ static float apply_dj_filter_target_value(float v) {
     return v;
 }
 
+// Status HUD: Y positions are captured after setup prints "Name: M5Blue".
+static int s_disp_line_h = 16;
+static int s_disp_bt_y = 0;
+static int s_disp_ctrl_y = 0;
+static int s_disp_batt_y = 0;
+static const int kDispCtrlGapLines = 1; // blank lines between BT and the Z=/mV= row
+
 #if defined(DJ_FILTER_CTRL_ROTATION_ANGLE)
 // Piecewise-linear U005 calibration (mV) -> DJFilter v in [-1, +1].
 //   full left  (3145 mV) -> -1 (LPF heavy)
@@ -535,8 +542,8 @@ static void update_dj_filter_from_rotation_angle() {
     if (now_ms - last_rotation_dump_ms >= 200) {
         last_rotation_dump_ms = now_ms;
         section_start_us = (uint32_t)micros();
-        M5.Display.fillRect(0, 200, 320, 20, BLACK);
-        M5.Display.setCursor(0, 200);
+        M5.Display.fillRect(0, s_disp_ctrl_y, M5.Display.width(), s_disp_line_h, BLACK);
+        M5.Display.setCursor(0, s_disp_ctrl_y);
         M5.Display.setTextColor(YELLOW);
         M5.Display.printf("mV=%4d  v=%+.2f", mV, (double)v);
         control_stats_note_us(s_control_stats.display_us_min, s_control_stats.display_us_max, s_control_stats.display_us_sum,
@@ -549,6 +556,8 @@ static void update_dj_filter_from_rotation_angle() {
 #if defined(DJ_FILTER_CTRL_JOYSTICK2)
 static M5UnitJoystick2 g_joystick2;
 static bool g_joystick2_ok = false;
+static bool s_ui_joy_z = false;
+static int16_t s_ui_joy_y = 0;
 
 // 12-bit Y offset full-scale (~±4096).
 static const int16_t kJoystick2YOffsetFullScale = 4096;
@@ -766,21 +775,8 @@ static void update_dj_filter_from_joystick2() {
     }
 
     v = apply_dj_filter_target_value(v);
-
-    static uint32_t last_joy_dump_ms = 0;
-    uint32_t now_ms = (uint32_t)millis();
-    if (now_ms - last_joy_dump_ms >= 200) {
-        last_joy_dump_ms = now_ms;
-        uint32_t section_start_us = (uint32_t)micros();
-        M5.Display.fillRect(0, 200, 320, 20, BLACK);
-        M5.Display.setCursor(0, 200);
-        M5.Display.setTextColor(YELLOW);
-        const int16_t y_show = s_y_held_valid ? s_y_held : s_y;
-        M5.Display.printf("Z=%d Y=%+5d v=%+.2f", s_z_latched ? 1 : 0, (int)y_show, (double)v);
-        control_stats_note_us(s_control_stats.display_us_min, s_control_stats.display_us_max, s_control_stats.display_us_sum,
-                              (uint32_t)micros() - section_start_us);
-        s_control_stats.display_update_count++;
-    }
+    s_ui_joy_z = s_z_latched;
+    s_ui_joy_y = s_y_held_valid ? s_y_held : s_y;
 }
 #endif // DJ_FILTER_CTRL_JOYSTICK2
 
@@ -888,15 +884,54 @@ static void dual_button_poll_task(void* arg) {
 }
 #endif // USE_DUAL_BUTTON_PORT_A
 
+static void init_status_display_layout() {
+    s_disp_line_h = M5.Display.fontHeight();
+    if (s_disp_line_h < 8) {
+        s_disp_line_h = 16;
+    }
+    s_disp_bt_y = M5.Display.getCursorY();
+    s_disp_ctrl_y = s_disp_bt_y + s_disp_line_h * (1 + kDispCtrlGapLines);
+    s_disp_batt_y = s_disp_ctrl_y + s_disp_line_h * 2;
+}
+
 static void update_bt_status_display() {
     if (!g_bt_state_display_dirty) return;
     g_bt_state_display_dirty = false;
     const char* state_str[] = {"Disconnected", "Connecting", "Connected", "Disconnecting"};
     esp_a2d_connection_state_t state = g_bt_connection_state;
-    M5.Display.fillRect(0, 180, 320, 20, BLACK);
-    M5.Display.setCursor(0, 180);
+    M5.Display.fillRect(0, s_disp_bt_y, M5.Display.width(), s_disp_line_h, BLACK);
+    M5.Display.setCursor(0, s_disp_bt_y);
     M5.Display.setTextColor(state == ESP_A2D_CONNECTION_STATE_CONNECTED ? GREEN : YELLOW);
     M5.Display.printf("BT: %s", state_str[state]);
+}
+
+#if defined(DJ_FILTER_CTRL_JOYSTICK2)
+static void update_joystick_status_display() {
+    static uint32_t last_ms = 0;
+    uint32_t now_ms = (uint32_t)millis();
+    if (now_ms - last_ms < 200) return;
+    last_ms = now_ms;
+    uint32_t section_start_us = (uint32_t)micros();
+    M5.Display.fillRect(0, s_disp_ctrl_y, M5.Display.width(), s_disp_line_h, BLACK);
+    M5.Display.setCursor(0, s_disp_ctrl_y);
+    M5.Display.setTextColor(YELLOW);
+    M5.Display.printf("Z=%d Y= %+d v = %+.2f", s_ui_joy_z ? 1 : 0, (int)s_ui_joy_y, (double)g_dj_filter_target_value);
+    control_stats_note_us(s_control_stats.display_us_min, s_control_stats.display_us_max, s_control_stats.display_us_sum,
+                          (uint32_t)micros() - section_start_us);
+    s_control_stats.display_update_count++;
+}
+#endif
+
+static void update_battery_status_display() {
+    static uint32_t last_ms = 0;
+    uint32_t now_ms = (uint32_t)millis();
+    if (now_ms - last_ms < 500 && last_ms != 0) return;
+    last_ms = now_ms;
+    const int batt_pct = M5.Power.getBatteryLevel();
+    M5.Display.fillRect(0, s_disp_batt_y, M5.Display.width(), s_disp_line_h, BLACK);
+    M5.Display.setCursor(0, s_disp_batt_y);
+    M5.Display.setTextColor(YELLOW);
+    M5.Display.printf("Battery: %3d%%", batt_pct);
 }
 
 // Startup step trace: default no delay (-DSTARTUP_STEP_DELAY_MS to override).
@@ -1408,9 +1443,6 @@ void setup() {
     // Display setup
     M5.Display.setTextSize(2);
     M5.Display.setTextColor(WHITE);
-    M5.Display.println("\nM5Blue - Phase 3");
-    M5.Display.println("A2DP queued I2S processing");
-    M5.Display.println("");
 
 #if defined(USE_DUAL_BUTTON_PORT_A)
     // Initialize dual button pins (PORT.A GPIO). Not used when Joystick2 owns PORT.A.
@@ -1625,6 +1657,9 @@ void setup() {
     ESP_LOGI("main", "Setup complete. Waiting for Bluetooth connection...");
     M5.Display.setTextColor(WHITE);
     M5.Display.println("Name: M5Blue");
+    init_status_display_layout();
+    update_bt_status_display();
+    update_battery_status_display();
 
     // Set LED to indicate ready
     device.setRGBLED(0, 0x00FF00); // Green - ready
@@ -1647,9 +1682,11 @@ void loop() {
 
 #if defined(DJ_FILTER_CTRL_JOYSTICK2)
     update_dj_filter_from_joystick2();
+    update_joystick_status_display();
 #elif defined(DJ_FILTER_CTRL_ROTATION_ANGLE)
     update_dj_filter_from_rotation_angle();
 #endif
+    update_battery_status_display();
 
     section_start_us = (uint32_t)micros();
     dump_audio_stats_if_due();
