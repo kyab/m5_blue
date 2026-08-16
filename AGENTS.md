@@ -29,6 +29,17 @@ Triggers that should cause the agent to consult Going-Zero on GitHub:
 - Documentation (README.md etc.): English.
 - Chat responses to the user: Japanese (per user preference).
 
+## Git branches
+
+When creating a new branch, use one of:
+
+- `feat/<short-name>` — new feature
+- `fix/<short-name>` — bug fix
+- `docs/<short-name>` — documentation
+- `chore/<short-name>` — other small updates
+
+If the prefix is unclear, ask before creating the branch.
+
 ## Pull requests
 
 When creating or updating pull requests for this repository (for example with `gh pr create` or `gh pr edit`):
