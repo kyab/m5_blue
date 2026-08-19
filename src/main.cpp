@@ -564,7 +564,7 @@ static const int16_t kJoystick2YOffsetFullScale = 4096;
 
 // Joystick2 Y -> DJFilter v. Linear map; tune these on device by ear / feel.
 // Input y_offset is typically in [-4096, +4096], center = 0.
-// Positive Y (cable side) -> HPF (v > 0). Negative Y -> LPF (v < 0).
+// Positive Y -> HPF (v > 0). Negative Y (cable side down) -> LPF (v < 0).
 // Inclusive deadband: returns 0 for kJoystick2YDeadbandNeg <= y <= kJoystick2YDeadbandPos.
 // Linear map starts at the next integer outside the deadband:
 //   y = deadband_pos+1 -> kJoystick2FilterVHPFMin,  y = +4096 -> kJoystick2FilterVHPFMax
@@ -651,6 +651,10 @@ static bool joystick2_read_y_offset(int16_t* y_out) {
             continue;
         }
         int16_t y = (int16_t)(data[0] | ((uint16_t)data[1] << 8));
+
+        // Nagative Y is cable side/LED down.
+        y = -y;
+
         // 12-bit offset is about ±4096; reject wild values from truncated/corrupt transfers.
         if (y >= -4500 && y <= 4500) {
             *y_out = y;
