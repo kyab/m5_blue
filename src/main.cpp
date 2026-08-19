@@ -7,6 +7,7 @@
 #include "BluetoothA2DPSink.h"
 #include "RingBuffer.hpp"
 #include "DJFilter.hpp"
+#include "A2DPSinkQueuedI2S.hpp"
 #include "esp_gap_bt_api.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
@@ -75,30 +76,30 @@
 #endif
 
 // Audio I2C device (for RGB LED, HP detect, etc.)
-AudioI2c device;
+AudioI2c g_device;
 
 // ES8388 codec on the internal/M-Bus I2C (Wire1), not PORT.A
-ES8388 es8388(&Wire1, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN);
+ES8388 g_es8388(&Wire1, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN);
 
 static const uint32_t kSampleRate = 44100;
 static const uint32_t kStereoChannels = 2;
 
 // I2SStream for audio output (fed by a single writer task)
-I2SStream i2s;
+I2SStream g_i2s;
 
 static const uint32_t kI2SWriterFrames = 256; // ~5.8 ms at 44.1 kHz; caps resume latency
 static const size_t kI2SWriterBytes = kI2SWriterFrames * kStereoChannels * sizeof(int16_t);
 static const size_t kBtPcmRingBytes = 32768;      // ~186 ms stereo 16-bit queue; absorbs A2DP burst jitter
 static const size_t kBtPcmPrebufferBytes = 24576; // ~139 ms: resume into the stable high-water region
 static const uint32_t kBtPcmPushWaitMs = 20;      // Restore bounded back-pressure before dropping PCM
-static uint8_t s_bt_pcm_ring[kBtPcmRingBytes];
-static size_t s_bt_pcm_head = 0;
-static size_t s_bt_pcm_tail = 0;
-static size_t s_bt_pcm_used = 0;
-static portMUX_TYPE s_bt_pcm_mux = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t s_i2s_writer_bytes[kI2SWriterBytes];
-static TaskHandle_t s_i2s_writer_task = nullptr;
-static_assert(sizeof(s_i2s_writer_bytes) == kI2SWriterBytes, "I2S writer buffer size mismatch");
+static uint8_t g_bt_pcm_ring[kBtPcmRingBytes];
+static size_t g_bt_pcm_head = 0;
+static size_t g_bt_pcm_tail = 0;
+static size_t g_bt_pcm_used = 0;
+static portMUX_TYPE g_bt_pcm_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t g_i2s_writer_bytes[kI2SWriterBytes];
+static TaskHandle_t g_i2s_writer_task = nullptr;
+static_assert(sizeof(g_i2s_writer_bytes) == kI2SWriterBytes, "I2S writer buffer size mismatch");
 
 extern volatile esp_a2d_audio_state_t g_a2dp_audio_state;
 static size_t bt_pcm_ring_used();
@@ -126,9 +127,9 @@ struct AudioStats {
     volatile uint32_t writer_write_us_sum = 0;
 };
 
-static AudioStats s_audio_stats;
-static portMUX_TYPE s_audio_stats_mux = portMUX_INITIALIZER_UNLOCKED;
-static volatile uint32_t s_last_callback_us = 0;
+static AudioStats g_audio_stats;
+static portMUX_TYPE g_audio_stats_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t g_last_callback_us = 0;
 
 static inline void stats_minmax_u32(volatile uint32_t& min_v, volatile uint32_t& max_v, uint32_t value) {
     if (value < min_v) min_v = value;
@@ -137,54 +138,54 @@ static inline void stats_minmax_u32(volatile uint32_t& min_v, volatile uint32_t&
 
 static void stats_note_callback(uint32_t sample_num) {
     uint32_t now_us = (uint32_t)micros();
-    portENTER_CRITICAL(&s_audio_stats_mux);
-    s_audio_stats.callback_count++;
-    stats_minmax_u32(s_audio_stats.callback_samples_min, s_audio_stats.callback_samples_max, sample_num);
-    if (s_last_callback_us != 0) {
-        stats_minmax_u32(s_audio_stats.callback_gap_us_min, s_audio_stats.callback_gap_us_max, now_us - s_last_callback_us);
+    portENTER_CRITICAL(&g_audio_stats_mux);
+    g_audio_stats.callback_count++;
+    stats_minmax_u32(g_audio_stats.callback_samples_min, g_audio_stats.callback_samples_max, sample_num);
+    if (g_last_callback_us != 0) {
+        stats_minmax_u32(g_audio_stats.callback_gap_us_min, g_audio_stats.callback_gap_us_max, now_us - g_last_callback_us);
     }
-    s_last_callback_us = now_us;
-    portEXIT_CRITICAL(&s_audio_stats_mux);
+    g_last_callback_us = now_us;
+    portEXIT_CRITICAL(&g_audio_stats_mux);
 }
 
 static void stats_reset_callback_gap() {
-    portENTER_CRITICAL(&s_audio_stats_mux);
-    s_last_callback_us = 0;
-    portEXIT_CRITICAL(&s_audio_stats_mux);
+    portENTER_CRITICAL(&g_audio_stats_mux);
+    g_last_callback_us = 0;
+    portEXIT_CRITICAL(&g_audio_stats_mux);
 }
 
 static void stats_note_ring_used(size_t used) {
     uint32_t used_u32 = (used > UINT32_MAX) ? UINT32_MAX : (uint32_t)used;
-    portENTER_CRITICAL(&s_audio_stats_mux);
-    stats_minmax_u32(s_audio_stats.ring_used_min, s_audio_stats.ring_used_max, used_u32);
-    portEXIT_CRITICAL(&s_audio_stats_mux);
+    portENTER_CRITICAL(&g_audio_stats_mux);
+    stats_minmax_u32(g_audio_stats.ring_used_min, g_audio_stats.ring_used_max, used_u32);
+    portEXIT_CRITICAL(&g_audio_stats_mux);
 }
 
 static void stats_note_ring_drop(size_t bytes) {
     uint32_t bytes_u32 = (bytes > UINT32_MAX) ? UINT32_MAX : (uint32_t)bytes;
-    portENTER_CRITICAL(&s_audio_stats_mux);
-    s_audio_stats.ring_drop_count++;
-    s_audio_stats.ring_drop_bytes += bytes_u32;
-    portEXIT_CRITICAL(&s_audio_stats_mux);
+    portENTER_CRITICAL(&g_audio_stats_mux);
+    g_audio_stats.ring_drop_count++;
+    g_audio_stats.ring_drop_bytes += bytes_u32;
+    portEXIT_CRITICAL(&g_audio_stats_mux);
 }
 
 static void stats_note_writer(bool pcm_block, bool rebuffered, uint32_t write_us) {
-    portENTER_CRITICAL(&s_audio_stats_mux);
+    portENTER_CRITICAL(&g_audio_stats_mux);
     if (pcm_block)
-        s_audio_stats.writer_pcm_blocks++;
+        g_audio_stats.writer_pcm_blocks++;
     else
-        s_audio_stats.writer_dither_blocks++;
-    if (rebuffered) s_audio_stats.writer_rebuffer_count++;
-    s_audio_stats.writer_write_count++;
-    s_audio_stats.writer_write_us_sum += write_us;
-    stats_minmax_u32(s_audio_stats.writer_write_us_min, s_audio_stats.writer_write_us_max, write_us);
-    portEXIT_CRITICAL(&s_audio_stats_mux);
+        g_audio_stats.writer_dither_blocks++;
+    if (rebuffered) g_audio_stats.writer_rebuffer_count++;
+    g_audio_stats.writer_write_count++;
+    g_audio_stats.writer_write_us_sum += write_us;
+    stats_minmax_u32(g_audio_stats.writer_write_us_min, g_audio_stats.writer_write_us_max, write_us);
+    portEXIT_CRITICAL(&g_audio_stats_mux);
 }
 
 static void stats_note_rebuffer() {
-    portENTER_CRITICAL(&s_audio_stats_mux);
-    s_audio_stats.writer_rebuffer_count++;
-    portEXIT_CRITICAL(&s_audio_stats_mux);
+    portENTER_CRITICAL(&g_audio_stats_mux);
+    g_audio_stats.writer_rebuffer_count++;
+    portEXIT_CRITICAL(&g_audio_stats_mux);
 }
 
 struct ControlLoopStats {
@@ -216,8 +217,8 @@ struct ControlLoopStats {
     uint32_t audio_stats_us_sum = 0;
 };
 
-static ControlLoopStats s_control_stats;
-static uint32_t s_last_loop_start_us = 0;
+static ControlLoopStats g_control_stats;
+static uint32_t g_last_loop_start_us = 0;
 
 static inline void control_stats_note_us(uint32_t& min_v, uint32_t& max_v, uint32_t& sum_v, uint32_t value) {
     if (value < min_v) min_v = value;
@@ -231,8 +232,8 @@ static void dump_control_stats_if_due() {
     if (now_ms - s_last_dump_ms < 10000) return;
     s_last_dump_ms = now_ms;
 
-    ControlLoopStats stats = s_control_stats;
-    s_control_stats = ControlLoopStats();
+    ControlLoopStats stats = g_control_stats;
+    g_control_stats = ControlLoopStats();
     if (stats.loop_count == 0) return;
 
     uint32_t loop_gap_min = (stats.loop_gap_us_min == UINT32_MAX) ? 0 : stats.loop_gap_us_min;
@@ -282,10 +283,10 @@ static void dump_audio_stats_if_due() {
     s_last_dump_ms = now_ms;
 
     AudioStats stats;
-    portENTER_CRITICAL(&s_audio_stats_mux);
-    stats = s_audio_stats;
-    s_audio_stats = AudioStats();
-    portEXIT_CRITICAL(&s_audio_stats_mux);
+    portENTER_CRITICAL(&g_audio_stats_mux);
+    stats = g_audio_stats;
+    g_audio_stats = AudioStats();
+    portEXIT_CRITICAL(&g_audio_stats_mux);
 
     uint32_t cb_min = (stats.callback_samples_min == UINT32_MAX) ? 0 : stats.callback_samples_min;
     uint32_t cb_gap_min = (stats.callback_gap_us_min == UINT32_MAX) ? 0 : stats.callback_gap_us_min;
@@ -317,12 +318,12 @@ static void dump_audio_stats_if_due() {
 
 static void bt_pcm_ring_drop_locked(size_t bytes) {
     bytes = frame_align_bytes(bytes);
-    if (bytes > s_bt_pcm_used) bytes = s_bt_pcm_used;
-    s_bt_pcm_tail = (s_bt_pcm_tail + bytes) % kBtPcmRingBytes;
-    s_bt_pcm_used -= bytes;
+    if (bytes > g_bt_pcm_used) bytes = g_bt_pcm_used;
+    g_bt_pcm_tail = (g_bt_pcm_tail + bytes) % kBtPcmRingBytes;
+    g_bt_pcm_used -= bytes;
 }
 
-static size_t bt_pcm_ring_push(const uint8_t* data, size_t len) {
+size_t bt_pcm_ring_push(const uint8_t* data, size_t len) {
     len = frame_align_bytes(len);
     if (len == 0) return 0;
     if (len > kBtPcmRingBytes) {
@@ -332,126 +333,71 @@ static size_t bt_pcm_ring_push(const uint8_t* data, size_t len) {
 
     uint32_t wait_start_ms = (uint32_t)millis();
     for (;;) {
-        portENTER_CRITICAL(&s_bt_pcm_mux);
-        size_t free_bytes = kBtPcmRingBytes - s_bt_pcm_used;
-        portEXIT_CRITICAL(&s_bt_pcm_mux);
+        portENTER_CRITICAL(&g_bt_pcm_mux);
+        size_t free_bytes = kBtPcmRingBytes - g_bt_pcm_used;
+        portEXIT_CRITICAL(&g_bt_pcm_mux);
         if (free_bytes >= len) break;
         if ((uint32_t)millis() - wait_start_ms >= kBtPcmPushWaitMs) break;
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 
-    portENTER_CRITICAL(&s_bt_pcm_mux);
-    size_t free_bytes = kBtPcmRingBytes - s_bt_pcm_used;
+    portENTER_CRITICAL(&g_bt_pcm_mux);
+    size_t free_bytes = kBtPcmRingBytes - g_bt_pcm_used;
     if (free_bytes < len) {
         // Last resort: keep latency bounded if Bluetooth still outruns I2S after bounded back-pressure.
         stats_note_ring_drop(len - free_bytes);
         bt_pcm_ring_drop_locked(len - free_bytes);
     }
 
-    size_t first = std::min(len, kBtPcmRingBytes - s_bt_pcm_head);
-    memcpy(s_bt_pcm_ring + s_bt_pcm_head, data, first);
+    size_t first = std::min(len, kBtPcmRingBytes - g_bt_pcm_head);
+    memcpy(g_bt_pcm_ring + g_bt_pcm_head, data, first);
     if (len > first) {
-        memcpy(s_bt_pcm_ring, data + first, len - first);
+        memcpy(g_bt_pcm_ring, data + first, len - first);
     }
-    s_bt_pcm_head = (s_bt_pcm_head + len) % kBtPcmRingBytes;
-    s_bt_pcm_used += len;
-    stats_note_ring_used(s_bt_pcm_used);
-    portEXIT_CRITICAL(&s_bt_pcm_mux);
+    g_bt_pcm_head = (g_bt_pcm_head + len) % kBtPcmRingBytes;
+    g_bt_pcm_used += len;
+    stats_note_ring_used(g_bt_pcm_used);
+    portEXIT_CRITICAL(&g_bt_pcm_mux);
     return len;
 }
 
 static size_t bt_pcm_ring_pop(uint8_t* data, size_t max_len) {
     max_len = frame_align_bytes(max_len);
-    portENTER_CRITICAL(&s_bt_pcm_mux);
-    size_t len = std::min(max_len, s_bt_pcm_used);
+    portENTER_CRITICAL(&g_bt_pcm_mux);
+    size_t len = std::min(max_len, g_bt_pcm_used);
     len = frame_align_bytes(len);
     if (len > 0) {
-        size_t first = std::min(len, kBtPcmRingBytes - s_bt_pcm_tail);
-        memcpy(data, s_bt_pcm_ring + s_bt_pcm_tail, first);
+        size_t first = std::min(len, kBtPcmRingBytes - g_bt_pcm_tail);
+        memcpy(data, g_bt_pcm_ring + g_bt_pcm_tail, first);
         if (len > first) {
-            memcpy(data + first, s_bt_pcm_ring, len - first);
+            memcpy(data + first, g_bt_pcm_ring, len - first);
         }
-        s_bt_pcm_tail = (s_bt_pcm_tail + len) % kBtPcmRingBytes;
-        s_bt_pcm_used -= len;
+        g_bt_pcm_tail = (g_bt_pcm_tail + len) % kBtPcmRingBytes;
+        g_bt_pcm_used -= len;
     }
-    portEXIT_CRITICAL(&s_bt_pcm_mux);
+    portEXIT_CRITICAL(&g_bt_pcm_mux);
     return len;
 }
 
 static size_t bt_pcm_ring_used() {
-    portENTER_CRITICAL(&s_bt_pcm_mux);
-    size_t used = s_bt_pcm_used;
-    portEXIT_CRITICAL(&s_bt_pcm_mux);
+    portENTER_CRITICAL(&g_bt_pcm_mux);
+    size_t used = g_bt_pcm_used;
+    portEXIT_CRITICAL(&g_bt_pcm_mux);
     return used;
 }
 
 static void bt_pcm_ring_clear() {
-    portENTER_CRITICAL(&s_bt_pcm_mux);
-    s_bt_pcm_head = 0;
-    s_bt_pcm_tail = 0;
-    s_bt_pcm_used = 0;
-    portEXIT_CRITICAL(&s_bt_pcm_mux);
+    portENTER_CRITICAL(&g_bt_pcm_mux);
+    g_bt_pcm_head = 0;
+    g_bt_pcm_tail = 0;
+    g_bt_pcm_used = 0;
+    portEXIT_CRITICAL(&g_bt_pcm_mux);
 }
 
-class BluetoothA2DPOutputQueuedI2S : public BluetoothA2DPOutput {
-  public:
-    bool begin() override { return true; }
-    void end() override {}
-    void set_sample_rate(int rate) override {
-        if (rate != (int)kSampleRate) {
-            ESP_LOGW("a2dp", "A2DP sample rate %d differs from fixed I2S rate %lu", rate, (unsigned long)kSampleRate);
-        }
-    }
-    void set_output_active(bool active) override {
-        ESP_LOGI("a2dp", "queued output active=%d (I2S writer stays running)", active);
-    }
-    size_t write(const uint8_t* data, size_t len) override {
-        bt_pcm_ring_push(data, len);
-        return len; // Do not block the A2DP callback on I2S back-pressure.
-    }
-};
-
-static BluetoothA2DPOutputQueuedI2S a2dp_output;
-
-class BluetoothA2DPSinkKeepI2S : public BluetoothA2DPSink {
-  public:
-    using BluetoothA2DPSink::BluetoothA2DPSink;
-
-  protected:
-    void set_i2s_active(bool active) override {
-        if (active) {
-            BluetoothA2DPSink::set_i2s_active(true);
-        } else {
-            // Keep I2S running on remote pause/stop to avoid DAC stop/start pops.
-            ESP_LOGI("a2dp", "ignore set_i2s_active(false): keep I2S active");
-        }
-    }
-
-    // Change CoD minor after A2DP init so the host shows a headphone icon.
-    void av_hdl_a2d_evt(uint16_t event, void* p_param) override {
-        BluetoothA2DPSink::av_hdl_a2d_evt(event, p_param);
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 0, 0)
-        if (event != ESP_A2D_PROF_STATE_EVT || p_param == nullptr) {
-            return;
-        }
-        const auto* a2d = static_cast<const esp_a2d_cb_param_t*>(p_param);
-        if (a2d->a2d_prof_stat.init_state != ESP_A2D_INIT_SUCCESS) {
-            return;
-        }
-        esp_bt_cod_t cod = {};
-        cod.major = ESP_BT_COD_MAJOR_DEV_AV;
-        cod.minor = 0x06; // Headphones
-        cod.service = ESP_BT_COD_SRVC_AUDIO | ESP_BT_COD_SRVC_RENDERING;
-        esp_err_t err = esp_bt_gap_set_cod(cod, ESP_BT_INIT_COD);
-        if (err != ESP_OK) {
-            ESP_LOGW("a2dp", "esp_bt_gap_set_cod failed: %s", esp_err_to_name(err));
-        }
-#endif
-    }
-};
+BluetoothA2DPOutputQueuedI2S g_a2dp_output;
 
 // Bluetooth A2DP Sink with I2SStream
-BluetoothA2DPSinkKeepI2S a2dp_sink(a2dp_output);
+BluetoothA2DPSinkKeepI2S g_a2dp_sink(g_a2dp_output);
 
 // Ring buffer: delay (red) disabled for now; used by Going-Zero-style Freezer (blue) on g_ring.
 RingBufferInterleaved* g_ring = nullptr;
@@ -464,8 +410,8 @@ volatile bool g_effect_red = false;  // Delay effect (disabled — shares g_ring
 static DJFilter g_dj_filter;
 static volatile float g_dj_filter_target_value = 0.0f;
 // Scratch buffers for int16<->float deinterleave in the I2S writer task.
-static float s_dj_left[kI2SWriterFrames];
-static float s_dj_right[kI2SWriterFrames];
+static float g_dj_left[kI2SWriterFrames];
+static float g_dj_right[kI2SWriterFrames];
 
 // Same bypass deadzone as the U005 path so near-center / near-zero hits exact bypass.
 static const float kDjFilterBypassDeadzone = 0.03f;
@@ -480,10 +426,10 @@ static float apply_dj_filter_target_value(float v) {
 }
 
 // Status HUD: Y positions are captured after setup prints "Name: M5Blue".
-static int s_disp_line_h = 16;
-static int s_disp_bt_y = 0;
-static int s_disp_ctrl_y = 0;
-static int s_disp_batt_y = 0;
+static int g_disp_line_h = 16;
+static int g_disp_bt_y = 0;
+static int g_disp_ctrl_y = 0;
+static int g_disp_batt_y = 0;
 static const int kDispCtrlGapLines = 1; // blank lines between BT and the Z=/mV= row
 
 #if defined(DJ_FILTER_CTRL_ROTATION_ANGLE)
@@ -515,7 +461,7 @@ static void update_dj_filter_from_rotation_angle() {
     for (int i = 0; i < kOversampleN; i++) {
         mV_sum += analogReadMilliVolts(ROTATION_ANGLE_GPIO);
     }
-    control_stats_note_us(s_control_stats.adc_button_us_min, s_control_stats.adc_button_us_max, s_control_stats.adc_button_us_sum,
+    control_stats_note_us(g_control_stats.adc_button_us_min, g_control_stats.adc_button_us_max, g_control_stats.adc_button_us_sum,
                           (uint32_t)micros() - section_start_us);
     int mV_avg = mV_sum / kOversampleN;
 
@@ -537,18 +483,18 @@ static void update_dj_filter_from_rotation_angle() {
 
     float v = apply_dj_filter_target_value(map_rotation_angle_mv_to_filter_v(mV));
 
-    static uint32_t last_rotation_dump_ms = 0;
+    static uint32_t s_last_rotation_dump_ms = 0;
     uint32_t now_ms = (uint32_t)millis();
-    if (now_ms - last_rotation_dump_ms >= 200) {
-        last_rotation_dump_ms = now_ms;
+    if (now_ms - s_last_rotation_dump_ms >= 200) {
+        s_last_rotation_dump_ms = now_ms;
         section_start_us = (uint32_t)micros();
-        M5.Display.fillRect(0, s_disp_ctrl_y, M5.Display.width(), s_disp_line_h, BLACK);
-        M5.Display.setCursor(0, s_disp_ctrl_y);
+        M5.Display.fillRect(0, g_disp_ctrl_y, M5.Display.width(), g_disp_line_h, BLACK);
+        M5.Display.setCursor(0, g_disp_ctrl_y);
         M5.Display.setTextColor(YELLOW);
         M5.Display.printf("mV=%4d  v=%+.2f", mV, (double)v);
-        control_stats_note_us(s_control_stats.display_us_min, s_control_stats.display_us_max, s_control_stats.display_us_sum,
+        control_stats_note_us(g_control_stats.display_us_min, g_control_stats.display_us_max, g_control_stats.display_us_sum,
                               (uint32_t)micros() - section_start_us);
-        s_control_stats.display_update_count++;
+        g_control_stats.display_update_count++;
     }
 }
 #endif // DJ_FILTER_CTRL_ROTATION_ANGLE
@@ -556,8 +502,8 @@ static void update_dj_filter_from_rotation_angle() {
 #if defined(DJ_FILTER_CTRL_JOYSTICK2)
 static M5UnitJoystick2 g_joystick2;
 static bool g_joystick2_ok = false;
-static bool s_ui_joy_z = false;
-static int16_t s_ui_joy_y = 0;
+static bool g_ui_joy_z = false;
+static int16_t g_ui_joy_y = 0;
 
 // 12-bit Y offset full-scale (~±4096).
 static const int16_t kJoystick2YOffsetFullScale = 4096;
@@ -730,8 +676,8 @@ static void update_dj_filter_from_joystick2() {
         int16_t y_raw = s_y;
         const bool button_ok = joystick2_read_button(&button_raw);
         const bool y_ok = joystick2_read_y_offset(&y_raw);
-        control_stats_note_us(s_control_stats.joystick_read_us_min, s_control_stats.joystick_read_us_max,
-                              s_control_stats.joystick_read_us_sum, (uint32_t)micros() - section_start_us);
+        control_stats_note_us(g_control_stats.joystick_read_us_min, g_control_stats.joystick_read_us_max,
+                              g_control_stats.joystick_read_us_sum, (uint32_t)micros() - section_start_us);
 
         if (button_ok) {
             s_button = button_raw;
@@ -779,8 +725,8 @@ static void update_dj_filter_from_joystick2() {
     }
 
     v = apply_dj_filter_target_value(v);
-    s_ui_joy_z = s_z_latched;
-    s_ui_joy_y = s_y_held_valid ? s_y_held : s_y;
+    g_ui_joy_z = s_z_latched;
+    g_ui_joy_y = s_y_held_valid ? s_y_held : s_y;
 }
 #endif // DJ_FILTER_CTRL_JOYSTICK2
 
@@ -812,27 +758,27 @@ enum class DacVolumeCurve {
     ExpK3,
 };
 
-static DacVolumeCurve s_dac_volume_curve = DacVolumeCurve::Gamma033;
-static int s_last_applied_dac_volume = -1;
+static DacVolumeCurve g_dac_volume_curve = DacVolumeCurve::Gamma033;
+static int g_last_applied_dac_volume = -1;
 
 // Deferred Module-Audio RGB LED (I2C off the hot path).
 #if defined(USE_DUAL_BUTTON_PORT_A)
 static const uint32_t kDualButtonPollMs = 5;
 #endif
 static const uint32_t kModuleRgbLedDeferMs = 10;
-static TaskHandle_t s_module_led_task = nullptr;
-static volatile uint32_t s_module_led_rgb0 = 0x00FF00;
-static volatile uint32_t s_module_led_rgb2 = 0x00FF00;
+static TaskHandle_t g_module_led_task = nullptr;
+static volatile uint32_t g_module_led_rgb0 = 0x00FF00;
+static volatile uint32_t g_module_led_rgb2 = 0x00FF00;
 
 static void module_rgb_led_task(void* arg) {
     (void)arg;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         vTaskDelay(pdMS_TO_TICKS(kModuleRgbLedDeferMs));
-        uint32_t c0 = s_module_led_rgb0;
-        uint32_t c2 = s_module_led_rgb2;
-        device.setRGBLED(0, c0);
-        device.setRGBLED(2, c2);
+        uint32_t c0 = g_module_led_rgb0;
+        uint32_t c2 = g_module_led_rgb2;
+        g_device.setRGBLED(0, c0);
+        g_device.setRGBLED(2, c2);
     }
 }
 
@@ -841,8 +787,8 @@ static void dual_button_poll_task(void* arg) {
     (void)arg;
     bool prev_blue = (digitalRead(DUAL_BUTTON_BLUE) == LOW);
     g_effect_blue = prev_blue;
-    s_module_led_rgb0 = prev_blue ? 0x0000FF : 0x00FF00;
-    if (s_module_led_task != nullptr) xTaskNotifyGive(s_module_led_task);
+    g_module_led_rgb0 = prev_blue ? 0x0000FF : 0x00FF00;
+    if (g_module_led_task != nullptr) xTaskNotifyGive(g_module_led_task);
 
     for (;;) {
         uint32_t section_start_us = (uint32_t)micros();
@@ -855,12 +801,12 @@ static void dual_button_poll_task(void* arg) {
             g_effect_blue = blue;
             if (blue) {
                 ESP_LOGI("main", "Effect Blue ON (Freezer)");
-                s_module_led_rgb0 = 0x0000FF;
+                g_module_led_rgb0 = 0x0000FF;
             } else {
                 ESP_LOGI("main", "Effect Blue OFF");
-                s_module_led_rgb0 = 0x00FF00;
+                g_module_led_rgb0 = 0x00FF00;
             }
-            if (s_module_led_task != nullptr) xTaskNotifyGive(s_module_led_task);
+            if (g_module_led_task != nullptr) xTaskNotifyGive(g_module_led_task);
         }
 
 #if 0
@@ -870,18 +816,18 @@ static void dual_button_poll_task(void* arg) {
             g_effect_red = red;
             if (red) {
                 ESP_LOGI("main", "Effect Red ON (Delay)");
-                s_module_led_rgb2 = 0xFF0000;
+                g_module_led_rgb2 = 0xFF0000;
             } else {
                 ESP_LOGI("main", "Effect Red OFF");
-                s_module_led_rgb2 = 0x00FF00;
+                g_module_led_rgb2 = 0x00FF00;
             }
-            if (s_module_led_task != nullptr) xTaskNotifyGive(s_module_led_task);
+            if (g_module_led_task != nullptr) xTaskNotifyGive(g_module_led_task);
         }
 #else
         (void)red;
 #endif
 
-        control_stats_note_us(s_control_stats.button_us_min, s_control_stats.button_us_max, s_control_stats.button_us_sum,
+        control_stats_note_us(g_control_stats.button_us_min, g_control_stats.button_us_max, g_control_stats.button_us_sum,
                               (uint32_t)micros() - section_start_us);
         vTaskDelay(pdMS_TO_TICKS(kDualButtonPollMs));
     }
@@ -889,13 +835,13 @@ static void dual_button_poll_task(void* arg) {
 #endif // USE_DUAL_BUTTON_PORT_A
 
 static void init_status_display_layout() {
-    s_disp_line_h = M5.Display.fontHeight();
-    if (s_disp_line_h < 8) {
-        s_disp_line_h = 16;
+    g_disp_line_h = M5.Display.fontHeight();
+    if (g_disp_line_h < 8) {
+        g_disp_line_h = 16;
     }
-    s_disp_bt_y = M5.Display.getCursorY();
-    s_disp_ctrl_y = s_disp_bt_y + s_disp_line_h * (1 + kDispCtrlGapLines);
-    s_disp_batt_y = s_disp_ctrl_y + s_disp_line_h * 2;
+    g_disp_bt_y = M5.Display.getCursorY();
+    g_disp_ctrl_y = g_disp_bt_y + g_disp_line_h * (1 + kDispCtrlGapLines);
+    g_disp_batt_y = g_disp_ctrl_y + g_disp_line_h * 2;
 }
 
 static void update_bt_status_display() {
@@ -903,37 +849,37 @@ static void update_bt_status_display() {
     g_bt_state_display_dirty = false;
     const char* state_str[] = {"Disconnected", "Connecting", "Connected", "Disconnecting"};
     esp_a2d_connection_state_t state = g_bt_connection_state;
-    M5.Display.fillRect(0, s_disp_bt_y, M5.Display.width(), s_disp_line_h, BLACK);
-    M5.Display.setCursor(0, s_disp_bt_y);
+    M5.Display.fillRect(0, g_disp_bt_y, M5.Display.width(), g_disp_line_h, BLACK);
+    M5.Display.setCursor(0, g_disp_bt_y);
     M5.Display.setTextColor(state == ESP_A2D_CONNECTION_STATE_CONNECTED ? GREEN : YELLOW);
     M5.Display.printf("BT: %s", state_str[state]);
 }
 
 #if defined(DJ_FILTER_CTRL_JOYSTICK2)
 static void update_joystick_status_display() {
-    static uint32_t last_ms = 0;
+    static uint32_t s_last_ms = 0;
     uint32_t now_ms = (uint32_t)millis();
-    if (now_ms - last_ms < 200) return;
-    last_ms = now_ms;
+    if (now_ms - s_last_ms < 200) return;
+    s_last_ms = now_ms;
     uint32_t section_start_us = (uint32_t)micros();
-    M5.Display.fillRect(0, s_disp_ctrl_y, M5.Display.width(), s_disp_line_h, BLACK);
-    M5.Display.setCursor(0, s_disp_ctrl_y);
+    M5.Display.fillRect(0, g_disp_ctrl_y, M5.Display.width(), g_disp_line_h, BLACK);
+    M5.Display.setCursor(0, g_disp_ctrl_y);
     M5.Display.setTextColor(YELLOW);
-    M5.Display.printf("Z=%d Y= %+d v = %+.2f", s_ui_joy_z ? 1 : 0, (int)s_ui_joy_y, (double)g_dj_filter_target_value);
-    control_stats_note_us(s_control_stats.display_us_min, s_control_stats.display_us_max, s_control_stats.display_us_sum,
+    M5.Display.printf("Z=%d Y= %+d v = %+.2f", g_ui_joy_z ? 1 : 0, (int)g_ui_joy_y, (double)g_dj_filter_target_value);
+    control_stats_note_us(g_control_stats.display_us_min, g_control_stats.display_us_max, g_control_stats.display_us_sum,
                           (uint32_t)micros() - section_start_us);
-    s_control_stats.display_update_count++;
+    g_control_stats.display_update_count++;
 }
 #endif
 
 static void update_battery_status_display() {
-    static uint32_t last_ms = 0;
+    static uint32_t s_last_ms = 0;
     uint32_t now_ms = (uint32_t)millis();
-    if (now_ms - last_ms < 500 && last_ms != 0) return;
-    last_ms = now_ms;
+    if (now_ms - s_last_ms < 500 && s_last_ms != 0) return;
+    s_last_ms = now_ms;
     const int batt_pct = M5.Power.getBatteryLevel();
-    M5.Display.fillRect(0, s_disp_batt_y, M5.Display.width(), s_disp_line_h, BLACK);
-    M5.Display.setCursor(0, s_disp_batt_y);
+    M5.Display.fillRect(0, g_disp_batt_y, M5.Display.width(), g_disp_line_h, BLACK);
+    M5.Display.setCursor(0, g_disp_batt_y);
     M5.Display.setTextColor(YELLOW);
     M5.Display.printf("Battery: %3d%%", batt_pct);
 }
@@ -943,11 +889,11 @@ static void update_battery_status_display() {
 #define STARTUP_STEP_DELAY_MS 0
 #endif
 static const int kStartupStepDelayMs = STARTUP_STEP_DELAY_MS;
-static uint32_t s_prev_startup_step_us = 0;
+static uint32_t g_prev_startup_step_us = 0;
 static void startup_step(const char* step_id, const char* step_name) {
     uint32_t now_us = (uint32_t)micros();
-    uint32_t delta_us = (s_prev_startup_step_us == 0) ? 0 : (uint32_t)(now_us - s_prev_startup_step_us);
-    s_prev_startup_step_us = now_us;
+    uint32_t delta_us = (g_prev_startup_step_us == 0) ? 0 : (uint32_t)(now_us - g_prev_startup_step_us);
+    g_prev_startup_step_us = now_us;
     Serial.printf("\n--- SETUP %s | %s | millis=%lu ts_us=%lu dt_us=%lu ---\n", step_id, step_name,
                   (unsigned long)millis(), (unsigned long)now_us, (unsigned long)delta_us);
     Serial.printf("{\"ts\":%lu,\"ts_us\":%lu,\"dt_us\":%lu,\"startup_step\":\"%s\",\"name\":\"%s\"}\n",
@@ -1192,13 +1138,13 @@ static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool f
         // DJ Filter (Going-Zero): deinterleave int16 -> float, process, reinterleave back with clamp.
         uint32_t n = (frame_count > kI2SWriterFrames) ? kI2SWriterFrames : frame_count;
         for (uint32_t i = 0; i < n; i++) {
-            s_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
-            s_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
+            g_dj_left[i] = static_cast<float>(data[i * 2]) / 32768.0f;
+            g_dj_right[i] = static_cast<float>(data[i * 2 + 1]) / 32768.0f;
         }
-        g_dj_filter.process(s_dj_left, s_dj_right, n);
+        g_dj_filter.process(g_dj_left, g_dj_right, n);
         for (uint32_t i = 0; i < n; i++) {
-            float l = s_dj_left[i] * 32768.0f;
-            float r = s_dj_right[i] * 32768.0f;
+            float l = g_dj_left[i] * 32768.0f;
+            float r = g_dj_right[i] * 32768.0f;
             if (l > 32767.0f)
                 l = 32767.0f;
             else if (l < -32768.0f)
@@ -1220,7 +1166,7 @@ static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool f
 
 static void i2s_writer_task(void* arg) {
     (void)arg;
-    const size_t block_bytes = sizeof(s_i2s_writer_bytes);
+    const size_t block_bytes = sizeof(g_i2s_writer_bytes);
     const uint32_t block_frames = block_bytes / (kStereoChannels * sizeof(int16_t));
     bool draining_bt_pcm = false;
     static bool s_bt_boundary_valid = false;
@@ -1256,15 +1202,15 @@ static void i2s_writer_task(void* arg) {
         }
 
         if (write_bt_pcm) {
-            size_t got = bt_pcm_ring_pop(s_i2s_writer_bytes, block_bytes);
+            size_t got = bt_pcm_ring_pop(g_i2s_writer_bytes, block_bytes);
             if (got != block_bytes) {
                 draining_bt_pcm = false;
                 write_bt_pcm = false;
                 rebuffered = true;
                 s_bt_boundary_valid = false;
-                fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
+                fill_dither_bytes(g_i2s_writer_bytes, block_bytes);
             } else {
-                int16_t* pcm = reinterpret_cast<int16_t*>(s_i2s_writer_bytes);
+                int16_t* pcm = reinterpret_cast<int16_t*>(g_i2s_writer_bytes);
                 const uint32_t last_frame_idx = (block_frames - 1U) * kStereoChannels;
                 if (s_bt_boundary_valid) {
                     int32_t dL = (int32_t)pcm[0] - (int32_t)s_bt_prev_tail_L;
@@ -1301,11 +1247,11 @@ static void i2s_writer_task(void* arg) {
             }
         } else {
             s_bt_boundary_valid = false;
-            fill_dither_bytes(s_i2s_writer_bytes, block_bytes);
+            fill_dither_bytes(g_i2s_writer_bytes, block_bytes);
         }
-        apply_effects_before_i2s(reinterpret_cast<int16_t*>(s_i2s_writer_bytes), block_frames, write_bt_pcm);
+        apply_effects_before_i2s(reinterpret_cast<int16_t*>(g_i2s_writer_bytes), block_frames, write_bt_pcm);
         uint32_t write_start_us = (uint32_t)micros();
-        size_t written = i2s.write(s_i2s_writer_bytes, block_bytes);
+        size_t written = g_i2s.write(g_i2s_writer_bytes, block_bytes);
         uint32_t write_us = (uint32_t)micros() - write_start_us;
         stats_note_writer(write_bt_pcm && written == block_bytes, rebuffered, write_us);
     }
@@ -1316,16 +1262,16 @@ void audio_callback(int16_t* data, uint32_t sample_num) {
     (void)data;
     stats_note_callback(sample_num);
 
-    static bool first_call = true;
-    if (first_call) {
+    static bool s_first_call = true;
+    if (s_first_call) {
         ESP_LOGI("audio", "*** audio_callback FIRST CALL *** samples=%lu", sample_num);
-        first_call = false;
+        s_first_call = false;
     }
 
-    static uint32_t processed_samples = 0;
-    processed_samples += sample_num;
-    if (processed_samples >= 44100) {
-        processed_samples = 0;
+    static uint32_t s_processed_samples = 0;
+    s_processed_samples += sample_num;
+    if (s_processed_samples >= 44100) {
+        s_processed_samples = 0;
         ESP_LOGI("audio", "audio_callback");
     }
 }
@@ -1339,9 +1285,9 @@ void connection_state_callback(esp_a2d_connection_state_t state, void* ptr) {
     g_a2dp_connected = (state == ESP_A2D_CONNECTION_STATE_CONNECTED);
     if (!g_a2dp_connected) {
         g_force_silent_output = true;
-        if (s_last_applied_dac_volume != 0) {
-            if (es8388.setDACVolume(0)) {
-                s_last_applied_dac_volume = 0;
+        if (g_last_applied_dac_volume != 0) {
+            if (g_es8388.setDACVolume(0)) {
+                g_last_applied_dac_volume = 0;
                 ESP_LOGI("main", "A2DP disconnected -> DAC volume=0");
             } else {
                 ESP_LOGW("main", "A2DP disconnected but failed to set DAC volume=0");
@@ -1369,7 +1315,7 @@ static int map_host_volume_to_dac(int host_volume_127) {
 
     float x = (float)host_volume_127 / 127.0f;
     float mapped = 0.0f;
-    switch (s_dac_volume_curve) {
+    switch (g_dac_volume_curve) {
     case DacVolumeCurve::Linear:
         mapped = x;
         break;
@@ -1413,14 +1359,14 @@ static void apply_host_volume_to_dac_if_needed() {
     int host_volume = g_host_volume_127;
     int dac_volume = map_host_volume_to_dac(host_volume);
     g_force_silent_output = (host_volume == 0);
-    if (dac_volume == s_last_applied_dac_volume) {
+    if (dac_volume == g_last_applied_dac_volume) {
         ESP_LOGD("main", "skip DAC volume write: host=%d dac=%d (same)", host_volume, dac_volume);
         g_host_volume_dirty = false;
         return;
     }
-    if (es8388.setDACVolume((uint8_t)dac_volume)) {
-        s_last_applied_dac_volume = dac_volume;
-        ESP_LOGI("main", "host volume=%d -> dac volume=%d (curve=%d)", host_volume, dac_volume, (int)s_dac_volume_curve);
+    if (g_es8388.setDACVolume((uint8_t)dac_volume)) {
+        g_last_applied_dac_volume = dac_volume;
+        ESP_LOGI("main", "host volume=%d -> dac volume=%d (curve=%d)", host_volume, dac_volume, (int)g_dac_volume_curve);
     } else {
         ESP_LOGW("main", "failed DAC volume update: host=%d dac=%d", host_volume, dac_volume);
     }
@@ -1474,7 +1420,7 @@ void setup() {
 
     // Initialize Module Audio I2C device (same Wire1 bus as ES8388)
     ESP_LOGI("main", "Initializing AudioI2c device...");
-    if (!device.begin(&Wire1, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN)) {
+    if (!g_device.begin(&Wire1, SYS_I2C_SDA_PIN, SYS_I2C_SCL_PIN)) {
         ESP_LOGW("main", "AudioI2c device not found");
         M5.Display.setTextColor(YELLOW);
         M5.Display.println("AudioI2c: N/A");
@@ -1482,14 +1428,14 @@ void setup() {
         ESP_LOGI("main", "AudioI2c OK");
         M5.Display.setTextColor(GREEN);
         M5.Display.println("AudioI2c: OK");
-        device.setHPMode(AUDIO_HPMODE_NATIONAL);
-        device.setRGBBrightness(50);
-        device.setRGBLED(0, 0x0000FF); // Blue - waiting
+        g_device.setHPMode(AUDIO_HPMODE_NATIONAL);
+        g_device.setRGBBrightness(50);
+        g_device.setRGBLED(0, 0x0000FF); // Blue - waiting
     }
     startup_step("S04", "AudioI2c");
 
     // Button sampling at fixed interval; RGB LED updates deferred on a lower-priority task (I2C).
-    if (xTaskCreatePinnedToCore(module_rgb_led_task, "ModRgbLed", 3072, nullptr, 3, &s_module_led_task, 0) != pdPASS) {
+    if (xTaskCreatePinnedToCore(module_rgb_led_task, "ModRgbLed", 3072, nullptr, 3, &g_module_led_task, 0) != pdPASS) {
         ESP_LOGE("main", "Failed to create ModRgbLed task");
     }
 #if defined(USE_DUAL_BUTTON_PORT_A)
@@ -1508,9 +1454,9 @@ void setup() {
 
     ESP_LOGI("main", "Initializing ES8388 codec...");
     // Patched Module-Audio: init() asserts DAC mute + volume 0. Do not use setDACmute() (broken RMW).
-    bool es8388_inited = es8388.init();
+    bool es8388_inited = g_es8388.init();
     if (!es8388_inited) {
-        es8388_inited = es8388.init();
+        es8388_inited = g_es8388.init();
     }
     if (!es8388_inited) {
         ESP_LOGE("main", "Failed to initialize ES8388!");
@@ -1525,11 +1471,11 @@ void setup() {
 
     // Library bug: Module-Audio setDACmute() reads ES8388_ADCCONTROL1 but writes DACCONTROL3 — unused.
 
-    es8388.setDACOutput(DAC_OUTPUT_OUT1);
-    es8388.setDACVolume(0);
-    s_last_applied_dac_volume = 0;
-    es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
-    es8388.setSampleRate(SAMPLE_RATE_44K);
+    g_es8388.setDACOutput(DAC_OUTPUT_OUT1);
+    g_es8388.setDACVolume(0);
+    g_last_applied_dac_volume = 0;
+    g_es8388.setBitsSample(ES_MODULE_DAC, BIT_LENGTH_16BITS);
+    g_es8388.setSampleRate(SAMPLE_RATE_44K);
 
     // DACCONTROL3 (0x19): bit5 = DACSoftRamp, bit1 = DACMute. Hold muted until I2S feeds PCM.
     {
@@ -1590,20 +1536,20 @@ void setup() {
     startup_step("S10", "ring_buffer");
 
     ESP_LOGI("main", "Configuring I2SStream for Module Audio...");
-    i2s.end();
+    g_i2s.end();
     startup_step("S11", "i2s.end");
-    auto i2s_cfg = i2s.defaultConfig();
+    auto i2s_cfg = g_i2s.defaultConfig();
     i2s_cfg.sample_rate = kSampleRate;
     i2s_cfg.channels = 2;
     i2s_cfg.bits_per_sample = 16;
     i2s_cfg.pin_bck = SYS_I2S_SCLK_PIN;
     i2s_cfg.pin_ws = SYS_I2S_LRCK_PIN;
     i2s_cfg.pin_data = SYS_I2S_DOUT_PIN;
-    i2s.begin(i2s_cfg);
+    g_i2s.begin(i2s_cfg);
     ESP_LOGI("main", "I2SStream pins: BCK=%d WS=%d DATA=%d", SYS_I2S_SCLK_PIN, SYS_I2S_LRCK_PIN, SYS_I2S_DOUT_PIN);
 
-    if (s_i2s_writer_task == nullptr) {
-        BaseType_t task_ok = xTaskCreatePinnedToCore(i2s_writer_task, "I2SWriter", 4096, nullptr, 2, &s_i2s_writer_task, 1);
+    if (g_i2s_writer_task == nullptr) {
+        BaseType_t task_ok = xTaskCreatePinnedToCore(i2s_writer_task, "I2SWriter", 4096, nullptr, 2, &g_i2s_writer_task, 1);
         if (task_ok != pdPASS) {
             ESP_LOGE("main", "Failed to start I2S writer task");
         }
@@ -1629,13 +1575,13 @@ void setup() {
     startup_step("S13", "DAC_SoftRamp");
 
     // Setup A2DP callbacks
-    a2dp_sink.set_on_connection_state_changed(connection_state_callback);
-    a2dp_sink.set_on_audio_state_changed(a2dp_audio_state_callback, nullptr);
-    a2dp_sink.set_digital_volume_control(false);
-    a2dp_sink.set_on_volumechange(handle_host_volume_change);
+    g_a2dp_sink.set_on_connection_state_changed(connection_state_callback);
+    g_a2dp_sink.set_on_audio_state_changed(a2dp_audio_state_callback, nullptr);
+    g_a2dp_sink.set_digital_volume_control(false);
+    g_a2dp_sink.set_on_volumechange(handle_host_volume_change);
 
     // Keep Bluetooth ingress lightweight; effects are applied in the I2S writer task.
-    a2dp_sink.set_raw_stream_reader_writer(audio_callback);
+    g_a2dp_sink.set_raw_stream_reader_writer(audio_callback);
 
     // Host auto-connect (Mac/PC reconnect when this device powers on):
     // A2DP/AVDTP do not define "who must initiate" the ACL; the stack may page
@@ -1644,16 +1590,16 @@ void setup() {
     // dependent. ESP32-A2DP enables outbound paging to the last paired source
     // (NVS `connected_bda` / `last_bda`) on stack-up plus retries after drop,
     // which matches typical headphone/speaker behavior after initial pairing.
-    a2dp_sink.set_auto_reconnect(true);
+    g_a2dp_sink.set_auto_reconnect(true);
     // Default reconnect_delay is 1000 ms; shorten slightly so paging starts sooner after boot.
-    a2dp_sink.set_reconnect_delay(500);
+    g_a2dp_sink.set_reconnect_delay(500);
 
     // Start A2DP sink
     ESP_LOGI("main", "Starting Bluetooth A2DP Sink...");
     M5.Display.setTextColor(CYAN);
     M5.Display.println("\nStarting BT...");
     startup_step("S14", "before_a2dp.start");
-    a2dp_sink.start("M5Blue");
+    g_a2dp_sink.start("M5Blue");
     startup_step("S15", "after_a2dp.start");
     // Reinforce after BT stack init (ESP32-A2DP fork uses ESP_LOGD for AVRCP volume paths).
     esp_log_level_set("BT_AV", ESP_LOG_WARN);
@@ -1666,21 +1612,21 @@ void setup() {
     update_battery_status_display();
 
     // Set LED to indicate ready
-    device.setRGBLED(0, 0x00FF00); // Green - ready
-    device.setRGBLED(1, 0x00FF00);
-    device.setRGBLED(2, 0x00FF00);
+    g_device.setRGBLED(0, 0x00FF00); // Green - ready
+    g_device.setRGBLED(1, 0x00FF00);
+    g_device.setRGBLED(2, 0x00FF00);
 }
 
 void loop() {
     uint32_t loop_start_us = (uint32_t)micros();
-    if (s_last_loop_start_us != 0) {
-        control_stats_note_us(s_control_stats.loop_gap_us_min, s_control_stats.loop_gap_us_max, s_control_stats.loop_gap_us_sum, loop_start_us - s_last_loop_start_us);
+    if (g_last_loop_start_us != 0) {
+        control_stats_note_us(g_control_stats.loop_gap_us_min, g_control_stats.loop_gap_us_max, g_control_stats.loop_gap_us_sum, loop_start_us - g_last_loop_start_us);
     }
-    s_last_loop_start_us = loop_start_us;
+    g_last_loop_start_us = loop_start_us;
 
     uint32_t section_start_us = (uint32_t)micros();
     M5.update();
-    control_stats_note_us(s_control_stats.m5_update_us_min, s_control_stats.m5_update_us_max, s_control_stats.m5_update_us_sum, (uint32_t)micros() - section_start_us);
+    control_stats_note_us(g_control_stats.m5_update_us_min, g_control_stats.m5_update_us_max, g_control_stats.m5_update_us_sum, (uint32_t)micros() - section_start_us);
     update_bt_status_display();
     apply_host_volume_to_dac_if_needed();
 
@@ -1694,9 +1640,9 @@ void loop() {
 
     section_start_us = (uint32_t)micros();
     dump_audio_stats_if_due();
-    control_stats_note_us(s_control_stats.audio_stats_us_min, s_control_stats.audio_stats_us_max, s_control_stats.audio_stats_us_sum, (uint32_t)micros() - section_start_us);
-    control_stats_note_us(s_control_stats.loop_body_us_min, s_control_stats.loop_body_us_max, s_control_stats.loop_body_us_sum, (uint32_t)micros() - loop_start_us);
-    s_control_stats.loop_count++;
+    control_stats_note_us(g_control_stats.audio_stats_us_min, g_control_stats.audio_stats_us_max, g_control_stats.audio_stats_us_sum, (uint32_t)micros() - section_start_us);
+    control_stats_note_us(g_control_stats.loop_body_us_min, g_control_stats.loop_body_us_max, g_control_stats.loop_body_us_sum, (uint32_t)micros() - loop_start_us);
+    g_control_stats.loop_count++;
     dump_control_stats_if_due();
 
     // Keep control latency low while still yielding to other tasks.
