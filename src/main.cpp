@@ -700,12 +700,12 @@ static void update_effects_from_joystick2() {
         uint8_t button_raw = s_button;
         int16_t x_raw = s_x;
         int16_t y_raw = s_y;
-        const bool button_ok = joystick2_read_button(&button_raw);
-        const bool axes_ok = joystick2_read_axes_offset(&x_raw, &y_raw);
+        const bool button_read_ok = joystick2_read_button(&button_raw);
+        const bool axes_read_ok = joystick2_read_axes_offset(&x_raw, &y_raw);
         control_stats_note_us(g_control_stats.joystick_read_us_min, g_control_stats.joystick_read_us_max,
                               g_control_stats.joystick_read_us_sum, (uint32_t)micros() - section_start_us);
 
-        if (button_ok) {
+        if (button_read_ok) {
             s_button = button_raw;
             s_button_read_failures = 0;
         } else {
@@ -716,7 +716,7 @@ static void update_effects_from_joystick2() {
                 s_z_release_count = 0;
             }
         }
-        if (axes_ok) {
+        if (axes_read_ok) {
             s_x = x_raw;
             s_y = y_raw;
         }
@@ -736,7 +736,7 @@ static void update_effects_from_joystick2() {
             s_z_release_count = 0;
         }
 
-        if (axes_ok) {
+        if (axes_read_ok) {
             // Detect sudden-zero I2C glitch on X.
             const bool x_sudden_zero =
                 s_x == 0 && (s_x_held > kAxisGlitchAbsPrev || s_x_held < -kAxisGlitchAbsPrev);
