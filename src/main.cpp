@@ -6,6 +6,7 @@
 #include "AudioTools.h"
 #include "BluetoothA2DPSink.h"
 #include "RingBuffer.hpp"
+#include "Freezer.hpp"
 #include "DJFilter.hpp"
 #include "A2DPSinkQueuedI2S.hpp"
 #include "esp_gap_bt_api.h"
@@ -52,7 +53,7 @@
 #define PORT_A_I2C_SCL_PIN 33
 
 // DJ filter control source — enable exactly one.
-//   DJ_FILTER_CTRL_JOYSTICK2      : Unit Joystick2 on PORT.A (I2C @0x63). Y axis drives the filter.
+//   DJ_FILTER_CTRL_JOYSTICK2      : Unit Joystick2 on PORT.A (I2C @0x63). X/Z control Freezer; Y drives the filter.
 //   DJ_FILTER_CTRL_ROTATION_ANGLE : Rotation angle unit (M5STACK-U005) on PORT.B (G36 ADC).
 #define DJ_FILTER_CTRL_JOYSTICK2 1
 // #define DJ_FILTER_CTRL_ROTATION_ANGLE 1
@@ -399,12 +400,12 @@ BluetoothA2DPOutputQueuedI2S g_a2dp_output;
 // Bluetooth A2DP Sink with I2SStream
 BluetoothA2DPSinkKeepI2S g_a2dp_sink(g_a2dp_output);
 
-// Ring buffer: delay (red) disabled for now; used by Going-Zero-style Freezer (blue) on g_ring.
+// Ring buffer: delay (red) disabled for now; used by the Freezer.
 RingBufferInterleaved* g_ring = nullptr;
+static Freezer g_freezer(nullptr);
 
-// Effect control targets written by dual_button_poll_task and consumed by the I2S writer task.
-volatile bool g_effect_blue = false; // Freezer (Going-Zero Freeze / Freezer.m)
-volatile bool g_effect_red = false;  // Delay effect (disabled — shares g_ring with Freezer)
+// Delay effect is disabled because it shares g_ring with Freezer.
+volatile bool g_effect_red = false;
 
 // DJ Filter (Going-Zero port): controller-driven LPF/HPF crossover
 static DJFilter g_dj_filter;
@@ -503,10 +504,13 @@ static void update_dj_filter_from_rotation_angle() {
 static M5UnitJoystick2 g_joystick2;
 static bool g_joystick2_ok = false;
 static bool g_ui_joy_z = false;
+static int16_t g_ui_joy_x = 0;
 static int16_t g_ui_joy_y = 0;
+static uint32_t g_ui_freezer_grain_samples = Freezer::kDefaultGrainSamples;
 
-// 12-bit Y offset full-scale (~±4096).
-static const int16_t kJoystick2YOffsetFullScale = 4096;
+// 12-bit axis offset full-scale (~±4096).
+static const int16_t kJoystick2AxisOffsetFullScale = 4096;
+static const int16_t kJoystick2XChangeThreshold = 200;
 
 // Joystick2 Y -> DJFilter v. Linear map; tune these on device by ear / feel.
 // Input y_offset is typically in [-4096, +4096], center = 0.
@@ -544,13 +548,28 @@ static float map_joystick2_linear(int16_t y, int16_t y_start, int16_t y_end, flo
 static float map_joystick2_y_offset_to_filter_v(int16_t y_offset) {
     if (y_offset > kJoystick2YDeadbandPos) {
         const int16_t y_start = (int16_t)(kJoystick2YDeadbandPos + 1);
-        return map_joystick2_linear(y_offset, y_start, kJoystick2YOffsetFullScale, kJoystick2FilterVHPFMin, kJoystick2FilterVHPFMax);
+        return map_joystick2_linear(y_offset, y_start, kJoystick2AxisOffsetFullScale, kJoystick2FilterVHPFMin, kJoystick2FilterVHPFMax);
     }
     if (y_offset < kJoystick2YDeadbandNeg) {
         const int16_t y_start = (int16_t)(kJoystick2YDeadbandNeg - 1);
-        return map_joystick2_linear(y_offset, y_start, (int16_t)(-kJoystick2YOffsetFullScale), kJoystick2FilterVLPFMin, kJoystick2FilterVLPFMax);
+        return map_joystick2_linear(y_offset, y_start, (int16_t)(-kJoystick2AxisOffsetFullScale), kJoystick2FilterVLPFMin, kJoystick2FilterVLPFMax);
     }
     return 0.0f;
+}
+
+// Match Going-Zero's linear grain-size slider: left=1000, center=3000, right=5000.
+static uint32_t map_joystick2_x_offset_to_freezer_grain(int16_t x_offset) {
+    int32_t x = x_offset;
+    if (x < -kJoystick2AxisOffsetFullScale) {
+        x = -kJoystick2AxisOffsetFullScale;
+    } else if (x > kJoystick2AxisOffsetFullScale) {
+        x = kJoystick2AxisOffsetFullScale;
+    }
+
+    const int32_t inputSpan = static_cast<int32_t>(kJoystick2AxisOffsetFullScale) * 2;
+    const int32_t outputSpan = static_cast<int32_t>(Freezer::kMaxGrainSamples - Freezer::kMinGrainSamples);
+    const int32_t offset = x + kJoystick2AxisOffsetFullScale;
+    return Freezer::kMinGrainSamples + static_cast<uint32_t>((offset * outputSpan + inputSpan / 2) / inputSpan);
 }
 
 // Vendor M5UnitJoystick2::read_bytes ignores Wire errors and can return stale/zero bytes.
@@ -590,19 +609,21 @@ static bool joystick2_read_button(uint8_t* button_out) {
     return false;
 }
 
-static bool joystick2_read_y_offset(int16_t* y_out) {
+static bool joystick2_read_axes_offset(int16_t* x_out, int16_t* y_out) {
     for (uint8_t attempt = 0; attempt < kJoystick2I2cRetries; attempt++) {
-        uint8_t data[2] = {0, 0};
-        if (!joystick2_read_bytes((uint8_t)(JOYSTICK2_OFFSET_ADC_VALUE_12BITS_REG + 2), data, 2)) {
+        uint8_t data[4] = {0, 0, 0, 0};
+        if (!joystick2_read_bytes(JOYSTICK2_OFFSET_ADC_VALUE_12BITS_REG, data, sizeof(data))) {
             continue;
         }
-        int16_t y = (int16_t)(data[0] | ((uint16_t)data[1] << 8));
+        int16_t x = (int16_t)(data[0] | ((uint16_t)data[1] << 8));
+        int16_t y = (int16_t)(data[2] | ((uint16_t)data[3] << 8));
 
-        // Nagative Y is cable side/LED down.
+        // Negative Y is cable side/LED down.
         y = -y;
 
-        // 12-bit offset is about ±4096; reject wild values from truncated/corrupt transfers.
-        if (y >= -4500 && y <= 4500) {
+        // 12-bit offsets are about ±4096; reject wild values from truncated/corrupt transfers.
+        if (x >= -4500 && x <= 4500 && y >= -4500 && y <= 4500) {
+            *x_out = x;
             *y_out = y;
             return true;
         }
@@ -648,46 +669,59 @@ static bool init_joystick2_portA() {
     } else {
         ESP_LOGW("main", "Joystick2 not found on PORT.A (SDA=%d SCL=%d)", sda, scl);
         M5.Display.setTextColor(YELLOW);
-        M5.Display.println("Joystick2: N/A");
+        M5.Display.println("Joystick2: N/A(2)");
         g_dj_filter_target_value = 0.0f;
     }
     return g_joystick2_ok;
 }
 
-// Y axis drives the DJ filter. Z is still read and debounced (for UI / future use) but does not gate the filter.
-static void update_dj_filter_from_joystick2() {
+// X sets the Freezer grain, Y drives the DJ filter, and Z activates Freezer while held.
+static void update_effects_from_joystick2() {
     float v = 0.0f;
     // Display / control use filtered values (not raw I2C) so brief bus errors do not flicker UI.
     static uint8_t s_button = 1; // 1 = released
+    static uint8_t s_button_read_failures = 0;
+    static int16_t s_x = 0;
     static int16_t s_y = 0;
     static bool s_z_latched = false;
     static uint8_t s_z_release_count = 0;
+    static int16_t s_x_held = 0;
+    static uint8_t s_x_zero_confirm = 0;
     static int16_t s_y_held = 0;
-    static bool s_y_held_valid = false;
     static uint8_t s_y_zero_confirm = 0;
     static const uint8_t kZReleaseConfirm = 12; // ~24 ms at loop delay(2)
-    static const int16_t kYGlitchAbsPrev = 500;
+    static const uint8_t kButtonReadFailureRelease = 12;
+    static const int16_t kAxisGlitchAbsPrev = 500;
     // Single-sample I2C zeros are rejected; sustained zeros are accepted as real center (~8 ms).
-    static const uint8_t kYZeroConfirm = 4;
+    static const uint8_t kAxisZeroConfirm = 4;
 
     if (g_joystick2_ok) {
         uint32_t section_start_us = (uint32_t)micros();
         uint8_t button_raw = s_button;
+        int16_t x_raw = s_x;
         int16_t y_raw = s_y;
         const bool button_ok = joystick2_read_button(&button_raw);
-        const bool y_ok = joystick2_read_y_offset(&y_raw);
+        const bool axes_ok = joystick2_read_axes_offset(&x_raw, &y_raw);
         control_stats_note_us(g_control_stats.joystick_read_us_min, g_control_stats.joystick_read_us_max,
                               g_control_stats.joystick_read_us_sum, (uint32_t)micros() - section_start_us);
 
         if (button_ok) {
             s_button = button_raw;
+            s_button_read_failures = 0;
+        } else {
+            if (s_button_read_failures < 255) s_button_read_failures++;
+            if (s_button_read_failures >= kButtonReadFailureRelease) {
+                s_button = 1;
+                s_z_latched = false;
+                s_z_release_count = 0;
+            }
         }
-        if (y_ok) {
+        if (axes_ok) {
+            s_x = x_raw;
             s_y = y_raw;
         }
 
         // Debounce Z (button): keep latched state stable despite brief I2C false releases.
-        // Z no longer affects the DJ filter target; latch is for display / future use only.
         const bool z_raw = (s_button == 0);
         if (z_raw) {
             s_z_release_count = 0;
@@ -702,31 +736,57 @@ static void update_dj_filter_from_joystick2() {
             s_z_release_count = 0;
         }
 
-        // Reject classic I2C glitch (one-shot Y==0 while clearly deflected), but if Y stays 0
-        // for kYZeroConfirm successful reads, treat it as a real snap-back to center.
-        const bool y_sudden_zero =
-            s_y_held_valid && s_y == 0 && (s_y_held > kYGlitchAbsPrev || s_y_held < -kYGlitchAbsPrev);
-        if (y_sudden_zero) {
-            if (y_ok && s_y_zero_confirm < 255) {
-                s_y_zero_confirm++;
+        if (axes_ok) {
+            // Detect sudden-zero I2C glitch on X.
+            const bool x_sudden_zero =
+                s_x == 0 && (s_x_held > kAxisGlitchAbsPrev || s_x_held < -kAxisGlitchAbsPrev);
+            if (x_sudden_zero) {
+                if (s_x_zero_confirm < 255) s_x_zero_confirm++;
+                if (s_x_zero_confirm >= kAxisZeroConfirm) {
+                    s_x_held = 0;
+                    s_x_zero_confirm = 0;
+                }
+            } else if (s_x <= kJoystick2XChangeThreshold && s_x >= -kJoystick2XChangeThreshold) {
+                // Slow return to center: snap so values below the change threshold cannot stick.
+                s_x_held = 0;
+                s_x_zero_confirm = 0;
+            } else {
+                const int32_t x_delta = static_cast<int32_t>(s_x) - static_cast<int32_t>(s_x_held);
+                const int32_t x_delta_abs = x_delta < 0 ? -x_delta : x_delta;
+                if (x_delta_abs >= kJoystick2XChangeThreshold) {
+                    s_x_held = s_x;
+                }
+                s_x_zero_confirm = 0;
             }
-            if (s_y_zero_confirm >= kYZeroConfirm) {
-                s_y_held = 0;
-                s_y_held_valid = true;
+
+            // Detect sudden-zero I2C glitch on Y.
+            const bool y_sudden_zero =
+                s_y == 0 && (s_y_held > kAxisGlitchAbsPrev || s_y_held < -kAxisGlitchAbsPrev);
+            if (y_sudden_zero) {
+                if (s_y_zero_confirm < 255) s_y_zero_confirm++;
+                if (s_y_zero_confirm >= kAxisZeroConfirm) {
+                    s_y_held = 0;
+                    s_y_zero_confirm = 0;
+                }
+            } else {
+                s_y_held = s_y;
                 s_y_zero_confirm = 0;
             }
-        } else {
-            s_y_zero_confirm = 0;
-            s_y_held = s_y;
-            s_y_held_valid = true;
         }
-        const int16_t y_used = s_y_held_valid ? s_y_held : s_y;
-        v = map_joystick2_y_offset_to_filter_v(y_used);
     }
 
+    const int16_t x_used = s_x_held;
+    const int16_t y_used = s_y_held;
+    const uint32_t grainSamples = map_joystick2_x_offset_to_freezer_grain(x_used);
+    v = map_joystick2_y_offset_to_filter_v(y_used);
     v = apply_dj_filter_target_value(v);
+
+    g_freezer.setGrainSize(grainSamples);
+    g_freezer.setActive(g_joystick2_ok && s_z_latched);
     g_ui_joy_z = s_z_latched;
-    g_ui_joy_y = s_y_held_valid ? s_y_held : s_y;
+    g_ui_joy_x = x_used;
+    g_ui_joy_y = y_used;
+    g_ui_freezer_grain_samples = grainSamples;
 }
 #endif // DJ_FILTER_CTRL_JOYSTICK2
 
@@ -786,7 +846,7 @@ static void module_rgb_led_task(void* arg) {
 static void dual_button_poll_task(void* arg) {
     (void)arg;
     bool prev_blue = (digitalRead(DUAL_BUTTON_BLUE) == LOW);
-    g_effect_blue = prev_blue;
+    g_freezer.setActive(prev_blue);
     g_module_led_rgb0 = prev_blue ? 0x0000FF : 0x00FF00;
     if (g_module_led_task != nullptr) xTaskNotifyGive(g_module_led_task);
 
@@ -798,7 +858,7 @@ static void dual_button_poll_task(void* arg) {
 
         if (blue != prev_blue) {
             prev_blue = blue;
-            g_effect_blue = blue;
+            g_freezer.setActive(blue);
             if (blue) {
                 ESP_LOGI("main", "Effect Blue ON (Freezer)");
                 g_module_led_rgb0 = 0x0000FF;
@@ -865,7 +925,10 @@ static void update_joystick_status_display() {
     M5.Display.fillRect(0, g_disp_ctrl_y, M5.Display.width(), g_disp_line_h, BLACK);
     M5.Display.setCursor(0, g_disp_ctrl_y);
     M5.Display.setTextColor(YELLOW);
-    M5.Display.printf("Z=%d Y= %+d v = %+.2f", g_ui_joy_z ? 1 : 0, (int)g_ui_joy_y, (double)g_dj_filter_target_value);
+    M5.Display.printf("Z=%d X=%+d G=%lu", g_ui_joy_z ? 1 : 0, (int)g_ui_joy_x, (unsigned long)g_ui_freezer_grain_samples);
+    M5.Display.fillRect(0, g_disp_ctrl_y + g_disp_line_h, M5.Display.width(), g_disp_line_h, BLACK);
+    M5.Display.setCursor(0, g_disp_ctrl_y + g_disp_line_h);
+    M5.Display.printf("Y=%+d v=%+.2f", (int)g_ui_joy_y, (double)g_dj_filter_target_value);
     control_stats_note_us(g_control_stats.display_us_min, g_control_stats.display_us_max, g_control_stats.display_us_sum,
                           (uint32_t)micros() - section_start_us);
     g_control_stats.display_update_count++;
@@ -947,160 +1010,6 @@ static void add_silence_dither_if_needed(int16_t* data, uint32_t frame_count) {
     }
 }
 
-// Going-Zero Freezer.m / MiniFader.h: FADE_SAMPLE_NUM (~1 ms at 44.1 kHz). Going-Zero default grain is 3000; M5_blue uses 2000 for shorter loop windows.
-static const uint32_t kFreezerFadeSamples = 50;
-static const uint32_t kFreezerDefaultGrainSamples = 2000;
-
-static int16_t fz_scale_i16(int16_t s, float rate) {
-    int32_t v = (int32_t)lroundf((float)s * rate);
-    if (v > 32767)
-        v = 32767;
-    else if (v < -32768)
-        v = -32768;
-    return static_cast<int16_t>(v);
-}
-
-// Freezer effect + ring capture (Going-Zero Freezer.m). Call only when g_ring is non-null and input is in `data`.
-static void apply_going_zero_freezer(int16_t* data, uint32_t frame_count) {
-    static bool s_active = false;
-    static bool s_is_fading_out = false;
-    static bool s_is_fading_in = false;
-    static bool s_target_active = false;
-    static uint32_t s_fade_out_ctr = 0;
-    static uint32_t s_fade_in_ctr = 0;
-    static uint32_t s_grain_size = kFreezerDefaultGrainSamples;
-    static uint32_t s_grain_sample_index = 0;
-    static size_t s_grain_start_frame = 0;
-    static uint32_t s_grain_mini_out = 0;
-    static uint32_t s_grain_mini_in = 0;
-
-    const size_t buf_frames = g_ring->getBufferSize();
-    if (buf_frames == 0) return;
-
-    for (uint32_t i = 0; i < frame_count; i++) {
-        uint32_t grain_sz = s_grain_size;
-        if (grain_sz > buf_frames) grain_sz = (uint32_t)buf_frames;
-        if (grain_sz == 0) grain_sz = 1;
-
-        int16_t* sl = &data[i * 2];
-        int16_t* sr = &data[i * 2 + 1];
-        int16_t L = *sl;
-        int16_t R = *sr;
-
-        const bool want = g_effect_blue;
-        if (want != s_active && !s_is_fading_out) {
-            s_target_active = want;
-            s_is_fading_out = true;
-            s_fade_out_ctr = kFreezerFadeSamples;
-        }
-
-        const bool was_fading_out = s_is_fading_out;
-        if (was_fading_out) {
-            if (s_active) {
-                size_t ri = (s_grain_start_frame + s_grain_sample_index) % buf_frames;
-                g_ring->readFrameModulo(ri, &L, &R);
-                uint32_t d = s_grain_sample_index + 1;
-                if (grain_sz - d == kFreezerFadeSamples) s_grain_mini_out = kFreezerFadeSamples;
-                if (grain_sz - d < kFreezerFadeSamples) {
-                    if (s_grain_mini_out > 0) {
-                        float rate = s_grain_mini_out / (float)kFreezerFadeSamples;
-                        L = fz_scale_i16(L, rate);
-                        R = fz_scale_i16(R, rate);
-                        s_grain_mini_out--;
-                    }
-                }
-                s_grain_sample_index++;
-                if (s_grain_sample_index >= grain_sz) {
-                    s_grain_sample_index = 0;
-                    s_grain_mini_in = 0;
-                }
-                if (s_grain_sample_index < kFreezerFadeSamples) {
-                    if (s_grain_mini_in < kFreezerFadeSamples) {
-                        float rate = s_grain_mini_in / (float)kFreezerFadeSamples;
-                        L = fz_scale_i16(L, rate);
-                        R = fz_scale_i16(R, rate);
-                        s_grain_mini_in++;
-                    }
-                }
-            }
-            if (s_fade_out_ctr > 0) {
-                float rate = s_fade_out_ctr / (float)kFreezerFadeSamples;
-                L = fz_scale_i16(L, rate);
-                R = fz_scale_i16(R, rate);
-                s_fade_out_ctr--;
-            }
-            if (s_fade_out_ctr == 0) {
-                s_active = s_target_active;
-                if (s_active) {
-                    uint32_t gsz = s_grain_size;
-                    if (gsz > buf_frames) gsz = (uint32_t)buf_frames;
-                    if (gsz == 0) gsz = 1;
-                    const size_t wp = g_ring->getWritePosition();
-                    s_grain_start_frame = (wp + buf_frames - gsz) % buf_frames;
-                    s_grain_sample_index = 0;
-                    s_grain_mini_in = 0;
-                    s_grain_mini_out = 0;
-                }
-                s_is_fading_out = false;
-                s_is_fading_in = true;
-                s_fade_in_ctr = 0;
-            }
-        }
-
-        if (!was_fading_out) {
-            if (s_active) {
-                size_t ri = (s_grain_start_frame + s_grain_sample_index) % buf_frames;
-                g_ring->readFrameModulo(ri, &L, &R);
-                uint32_t d = s_grain_sample_index + 1;
-                if (grain_sz - d == kFreezerFadeSamples) s_grain_mini_out = kFreezerFadeSamples;
-                if (grain_sz - d < kFreezerFadeSamples) {
-                    if (s_grain_mini_out > 0) {
-                        float rate = s_grain_mini_out / (float)kFreezerFadeSamples;
-                        L = fz_scale_i16(L, rate);
-                        R = fz_scale_i16(R, rate);
-                        s_grain_mini_out--;
-                    }
-                }
-                s_grain_sample_index++;
-                if (s_grain_sample_index >= grain_sz) {
-                    s_grain_sample_index = 0;
-                    s_grain_mini_in = 0;
-                }
-                if (s_grain_sample_index < kFreezerFadeSamples) {
-                    if (s_grain_mini_in < kFreezerFadeSamples) {
-                        float rate = s_grain_mini_in / (float)kFreezerFadeSamples;
-                        L = fz_scale_i16(L, rate);
-                        R = fz_scale_i16(R, rate);
-                        s_grain_mini_in++;
-                    }
-                }
-                if (s_is_fading_in) {
-                    if (s_fade_in_ctr < kFreezerFadeSamples) {
-                        float rate = s_fade_in_ctr / (float)kFreezerFadeSamples;
-                        L = fz_scale_i16(L, rate);
-                        R = fz_scale_i16(R, rate);
-                        s_fade_in_ctr++;
-                        if (s_fade_in_ctr >= kFreezerFadeSamples) s_is_fading_in = false;
-                    }
-                }
-            } else {
-                if (s_is_fading_in) {
-                    if (s_fade_in_ctr < kFreezerFadeSamples) {
-                        float rate = s_fade_in_ctr / (float)kFreezerFadeSamples;
-                        L = fz_scale_i16(L, rate);
-                        R = fz_scale_i16(R, rate);
-                        s_fade_in_ctr++;
-                        if (s_fade_in_ctr >= kFreezerFadeSamples) s_is_fading_in = false;
-                    }
-                }
-            }
-        }
-
-        *sl = L;
-        *sr = R;
-    }
-}
-
 static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool from_bt_pcm) {
     static float s_applied_dj_filter_value = 0.0f;
 
@@ -1124,10 +1033,7 @@ static void apply_effects_before_i2s(int16_t* data, uint32_t frame_count, bool f
 #endif
         (void)red_enabled;
 
-        if (g_ring != nullptr) {
-            g_ring->storeSamples(data, frame_count);
-            apply_going_zero_freezer(data, frame_count);
-        }
+        g_freezer.process(data, frame_count);
 
         float target_v = g_dj_filter_target_value;
         if (target_v != s_applied_dj_filter_value) {
@@ -1532,6 +1438,7 @@ void setup() {
 
     ESP_LOGI("main", "Initializing ring buffer...");
     g_ring = new RingBufferInterleaved();
+    g_freezer.setRingBuffer(g_ring);
     ESP_LOGI("main", "Ring buffer OK");
     startup_step("S10", "ring_buffer");
 
@@ -1631,7 +1538,7 @@ void loop() {
     apply_host_volume_to_dac_if_needed();
 
 #if defined(DJ_FILTER_CTRL_JOYSTICK2)
-    update_dj_filter_from_joystick2();
+    update_effects_from_joystick2();
     update_joystick_status_display();
 #elif defined(DJ_FILTER_CTRL_ROTATION_ANGLE)
     update_dj_filter_from_rotation_angle();
