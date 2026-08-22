@@ -1,0 +1,12 @@
+---
+description: Confirm C/C++ edits with host syntax-only compile, not a full firmware build
+alwaysApply: true
+---
+
+# Pre-confirm verification
+
+After C/C++ edits, run a host **syntax-only** compile. Do **not** run `pio run` or `pio check` after every edit.
+
+Command: see `.agents/skills/pio-workflow/SKILL.md` → Host syntax-only check.
+
+Full `pio run -e m5stack-core2` only when the user asks to build/flash, when Arduino/ESP-IDF APIs or `platformio.ini` change, or before a PR/flash.

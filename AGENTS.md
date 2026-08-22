@@ -57,6 +57,7 @@ When adding or updating plots, charts, or other data graphics in this repository
 ## Build / Flash
 
 - Use PlatformIO (`pio`) for building, uploading, and monitoring. See `.agents/skills/pio-workflow/SKILL.md`.
+- After C/C++ edits, confirm with a **host syntax-only** compile (`clang++ -std=c++17 -fsyntax-only`), not `pio run`. Full firmware build only when the user asks to build/flash, when Arduino/ESP-IDF APIs or `platformio.ini` change, or before a PR/flash. Do not run `pio check` unless asked.
 
 ## Cursor Cloud Agent (environment setup)
 
