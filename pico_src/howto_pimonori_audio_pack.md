@@ -1,3 +1,16 @@
+# About PIMORONI Pico Audio Pack I2S Audio Module
+https://shop.pimoroni.com/products/pico-audio-pack?variant=32369490853971
+
+DataSheet, Schematics, C/C++ examples.
+
+## Primary pins.
+VSYS=39(VSYS)
+I2S_DATA=12(GP9)
+I2S_BCK=14(GP10)
+I2S_LRCK=15(GP11)
+MUTE=29(GP22)
+
+# Build procedure of C/C++ Examples.
 ## PIMORONIのPico Audio Pack用C++サンプルのビルド方法
 
 https://github.com/pimoroni/pimoroni-pico/tree/main/examples/pico_audio
