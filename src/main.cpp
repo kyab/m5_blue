@@ -53,7 +53,7 @@
 #define PORT_A_I2C_SCL_PIN 33
 
 // DJ filter control source — enable exactly one.
-//   DJ_FILTER_CTRL_JOYSTICK2      : Unit Joystick2 on PORT.A (I2C @0x63). X/Z control Freezer; Y drives the filter.
+//   DJ_FILTER_CTRL_JOYSTICK2      : Unit Joystick2 on PORT.A (I2C @0x63).
 //   DJ_FILTER_CTRL_ROTATION_ANGLE : Rotation angle unit (M5STACK-U005) on PORT.B (G36 ADC).
 #define DJ_FILTER_CTRL_JOYSTICK2 1
 // #define DJ_FILTER_CTRL_ROTATION_ANGLE 1
@@ -512,16 +512,16 @@ static uint32_t g_ui_freezer_grain_samples = Freezer::kDefaultGrainSamples;
 static const int16_t kJoystick2AxisOffsetFullScale = 4096;
 static const int16_t kJoystick2XChangeThreshold = 200;
 
-// Joystick2 Y -> DJFilter v. Linear map; tune these on device by ear / feel.
-// Input y_offset is typically in [-4096, +4096], center = 0.
-// Positive Y -> HPF (v > 0). Negative Y (cable side down) -> LPF (v < 0).
-// Inclusive deadband: returns 0 for kJoystick2YDeadbandNeg <= y <= kJoystick2YDeadbandPos.
+// Joystick2 X -> DJFilter v. Linear map; tune these on device by ear / feel.
+// Input x_offset is typically in [-4096, +4096], center = 0.
+// Positive X -> HPF (v > 0). Negative X -> LPF (v < 0).
+// Inclusive deadband: returns 0 for kJoystick2XDeadbandNeg <= x <= kJoystick2XDeadbandPos.
 // Linear map starts at the next integer outside the deadband:
-//   y = deadband_pos+1 -> kJoystick2FilterVHPFMin,  y = +4096 -> kJoystick2FilterVHPFMax
-//   y = deadband_neg-1 -> kJoystick2FilterVLPFMin,  y = -4096 -> kJoystick2FilterVLPFMax
+//   x = deadband_pos+1 -> kJoystick2FilterVHPFMin,  x = +4096 -> kJoystick2FilterVHPFMax
+//   x = deadband_neg-1 -> kJoystick2FilterVLPFMin,  x = -4096 -> kJoystick2FilterVLPFMax
 // HPF constants are positive v; LPF constants are negative v.
-static const int16_t kJoystick2YDeadbandPos = 30;    // tune: +Y deadband end (inclusive)
-static const int16_t kJoystick2YDeadbandNeg = -30;   // tune: -Y deadband end (inclusive, <= 0)
+static const int16_t kJoystick2XDeadbandPos = 30;    // tune: +X deadband end (inclusive)
+static const int16_t kJoystick2XDeadbandNeg = -30;   // tune: -X deadband end (inclusive, <= 0)
 static const float kJoystick2FilterVHPFMin = 0.55f;  // tune: HPF v at linear-map start (>= 0)
 static const float kJoystick2FilterVHPFMax = 0.99f;  // tune: HPF v at +full-scale (>= 0)
 static const float kJoystick2FilterVLPFMin = -0.10f; // tune: LPF v at linear-map start (<= 0)
@@ -545,30 +545,30 @@ static float map_joystick2_linear(int16_t y, int16_t y_start, int16_t y_end, flo
     return v_start + t * (v_end - v_start);
 }
 
-static float map_joystick2_y_offset_to_filter_v(int16_t y_offset) {
-    if (y_offset > kJoystick2YDeadbandPos) {
-        const int16_t y_start = (int16_t)(kJoystick2YDeadbandPos + 1);
-        return map_joystick2_linear(y_offset, y_start, kJoystick2AxisOffsetFullScale, kJoystick2FilterVHPFMin, kJoystick2FilterVHPFMax);
+static float map_joystick2_x_offset_to_filter_v(int16_t x_offset) {
+    if (x_offset > kJoystick2XDeadbandPos) {
+        const int16_t x_start = (int16_t)(kJoystick2XDeadbandPos + 1);
+        return map_joystick2_linear(x_offset, x_start, kJoystick2AxisOffsetFullScale, kJoystick2FilterVHPFMin, kJoystick2FilterVHPFMax);
     }
-    if (y_offset < kJoystick2YDeadbandNeg) {
-        const int16_t y_start = (int16_t)(kJoystick2YDeadbandNeg - 1);
-        return map_joystick2_linear(y_offset, y_start, (int16_t)(-kJoystick2AxisOffsetFullScale), kJoystick2FilterVLPFMin, kJoystick2FilterVLPFMax);
+    if (x_offset < kJoystick2XDeadbandNeg) {
+        const int16_t x_start = (int16_t)(kJoystick2XDeadbandNeg - 1);
+        return map_joystick2_linear(x_offset, x_start, (int16_t)(-kJoystick2AxisOffsetFullScale), kJoystick2FilterVLPFMin, kJoystick2FilterVLPFMax);
     }
     return 0.0f;
 }
 
-// Match Going-Zero's linear grain-size slider: left=1000, center=3000, right=5000.
-static uint32_t map_joystick2_x_offset_to_freezer_grain(int16_t x_offset) {
-    int32_t x = x_offset;
-    if (x < -kJoystick2AxisOffsetFullScale) {
-        x = -kJoystick2AxisOffsetFullScale;
-    } else if (x > kJoystick2AxisOffsetFullScale) {
-        x = kJoystick2AxisOffsetFullScale;
+// Joystick2 Y -> Freezer grain size:
+static uint32_t map_joystick2_y_offset_to_freezer_grain(int16_t y_offset) {
+    int32_t y = y_offset;
+    if (y < -kJoystick2AxisOffsetFullScale) {
+        y = -kJoystick2AxisOffsetFullScale;
+    } else if (y > kJoystick2AxisOffsetFullScale) {
+        y = kJoystick2AxisOffsetFullScale;
     }
 
     const int32_t inputSpan = static_cast<int32_t>(kJoystick2AxisOffsetFullScale) * 2;
     const int32_t outputSpan = static_cast<int32_t>(Freezer::kMaxGrainSamples - Freezer::kMinGrainSamples);
-    const int32_t offset = x + kJoystick2AxisOffsetFullScale;
+    const int32_t offset = kJoystick2AxisOffsetFullScale - y;
     return Freezer::kMinGrainSamples + static_cast<uint32_t>((offset * outputSpan + inputSpan / 2) / inputSpan);
 }
 
@@ -649,16 +649,15 @@ static bool init_joystick2_portA() {
         return false;
     }
 
-    ESP_LOGI("main", "Scanning PORT.A I2C (Wire SDA=%d SCL=%d)...", sda, scl);
-    for (int addr = 1; addr < 127; addr++) {
-        Wire.beginTransmission(addr);
-        if (Wire.endTransmission() == 0) {
-            ESP_LOGI("main", "PORT.A found I2C device at address 0x%02X", addr);
-        }
-    }
-
     // Library begin() re-calls Wire.begin(); with the bus already on PORT.A pins that is a no-op.
-    g_joystick2_ok = g_joystick2.begin(&Wire, JOYSTICK2_ADDR, (uint8_t)sda, (uint8_t)scl, kJoystick2I2cHz);
+    g_joystick2_ok = false;
+    for (uint8_t attempt = 0; attempt < 5; attempt++) {
+        if (g_joystick2.begin(&Wire, JOYSTICK2_ADDR, (uint8_t)sda, (uint8_t)scl, kJoystick2I2cHz)) {
+            g_joystick2_ok = true;
+            break;
+        }
+        delay(50);
+    }
     // begin() may restart Wire; keep the slower clock for Grove-cable reliability.
     Wire.setClock(kJoystick2I2cHz);
     if (g_joystick2_ok) {
@@ -675,14 +674,12 @@ static bool init_joystick2_portA() {
     return g_joystick2_ok;
 }
 
-// X sets the Freezer grain, Y drives the DJ filter, and Z activates Freezer while held.
+// X drives the DJ filter, Y sets the Freezer grain, and Z activates Freezer while held.
 static void update_effects_from_joystick2() {
     float v = 0.0f;
-    // Display / control use filtered values (not raw I2C) so brief bus errors do not flicker UI.
+    // Control uses filtered values; display shows raw I2C axis offsets.
     static uint8_t s_button = 1; // 1 = released
     static uint8_t s_button_read_failures = 0;
-    static int16_t s_x = 0;
-    static int16_t s_y = 0;
     static bool s_z_latched = false;
     static uint8_t s_z_release_count = 0;
     static int16_t s_x_held = 0;
@@ -695,11 +692,13 @@ static void update_effects_from_joystick2() {
     // Single-sample I2C zeros are rejected; sustained zeros are accepted as real center (~8 ms).
     static const uint8_t kAxisZeroConfirm = 4;
 
+    int16_t x_raw = 0;
+    int16_t y_raw = 0;
+
     if (g_joystick2_ok) {
         uint32_t section_start_us = (uint32_t)micros();
         uint8_t button_raw = s_button;
-        int16_t x_raw = s_x;
-        int16_t y_raw = s_y;
+
         const bool button_read_ok = joystick2_read_button(&button_raw);
         const bool axes_read_ok = joystick2_read_axes_offset(&x_raw, &y_raw);
         control_stats_note_us(g_control_stats.joystick_read_us_min, g_control_stats.joystick_read_us_max,
@@ -716,11 +715,6 @@ static void update_effects_from_joystick2() {
                 s_z_release_count = 0;
             }
         }
-        if (axes_read_ok) {
-            s_x = x_raw;
-            s_y = y_raw;
-        }
-
         // Debounce Z (button): keep latched state stable despite brief I2C false releases.
         const bool z_raw = (s_button == 0);
         if (z_raw) {
@@ -739,29 +733,29 @@ static void update_effects_from_joystick2() {
         if (axes_read_ok) {
             // Detect sudden-zero I2C glitch on X.
             const bool x_sudden_zero =
-                s_x == 0 && (s_x_held > kAxisGlitchAbsPrev || s_x_held < -kAxisGlitchAbsPrev);
+                x_raw == 0 && (s_x_held > kAxisGlitchAbsPrev || s_x_held < -kAxisGlitchAbsPrev);
             if (x_sudden_zero) {
                 if (s_x_zero_confirm < 255) s_x_zero_confirm++;
                 if (s_x_zero_confirm >= kAxisZeroConfirm) {
                     s_x_held = 0;
                     s_x_zero_confirm = 0;
                 }
-            } else if (s_x <= kJoystick2XChangeThreshold && s_x >= -kJoystick2XChangeThreshold) {
+            } else if (x_raw <= kJoystick2XChangeThreshold && x_raw >= -kJoystick2XChangeThreshold) {
                 // Slow return to center: snap so values below the change threshold cannot stick.
                 s_x_held = 0;
                 s_x_zero_confirm = 0;
             } else {
-                const int32_t x_delta = static_cast<int32_t>(s_x) - static_cast<int32_t>(s_x_held);
+                const int32_t x_delta = static_cast<int32_t>(x_raw) - static_cast<int32_t>(s_x_held);
                 const int32_t x_delta_abs = x_delta < 0 ? -x_delta : x_delta;
                 if (x_delta_abs >= kJoystick2XChangeThreshold) {
-                    s_x_held = s_x;
+                    s_x_held = x_raw;
                 }
                 s_x_zero_confirm = 0;
             }
 
             // Detect sudden-zero I2C glitch on Y.
             const bool y_sudden_zero =
-                s_y == 0 && (s_y_held > kAxisGlitchAbsPrev || s_y_held < -kAxisGlitchAbsPrev);
+                y_raw == 0 && (s_y_held > kAxisGlitchAbsPrev || s_y_held < -kAxisGlitchAbsPrev);
             if (y_sudden_zero) {
                 if (s_y_zero_confirm < 255) s_y_zero_confirm++;
                 if (s_y_zero_confirm >= kAxisZeroConfirm) {
@@ -769,7 +763,7 @@ static void update_effects_from_joystick2() {
                     s_y_zero_confirm = 0;
                 }
             } else {
-                s_y_held = s_y;
+                s_y_held = y_raw;
                 s_y_zero_confirm = 0;
             }
         }
@@ -777,15 +771,15 @@ static void update_effects_from_joystick2() {
 
     const int16_t x_used = s_x_held;
     const int16_t y_used = s_y_held;
-    const uint32_t grainSamples = map_joystick2_x_offset_to_freezer_grain(x_used);
-    v = map_joystick2_y_offset_to_filter_v(y_used);
+    const uint32_t grainSamples = map_joystick2_y_offset_to_freezer_grain(y_used);
+    v = map_joystick2_x_offset_to_filter_v(x_used);
     v = apply_dj_filter_target_value(v);
+    g_ui_joy_x = x_raw;
+    g_ui_joy_y = y_raw;
 
     g_freezer.setGrainSize(grainSamples);
     g_freezer.setActive(g_joystick2_ok && s_z_latched);
     g_ui_joy_z = s_z_latched;
-    g_ui_joy_x = x_used;
-    g_ui_joy_y = y_used;
     g_ui_freezer_grain_samples = grainSamples;
 }
 #endif // DJ_FILTER_CTRL_JOYSTICK2
@@ -925,10 +919,10 @@ static void update_joystick_status_display() {
     M5.Display.fillRect(0, g_disp_ctrl_y, M5.Display.width(), g_disp_line_h, BLACK);
     M5.Display.setCursor(0, g_disp_ctrl_y);
     M5.Display.setTextColor(YELLOW);
-    M5.Display.printf("Z=%d X=%+d G=%lu", g_ui_joy_z ? 1 : 0, (int)g_ui_joy_x, (unsigned long)g_ui_freezer_grain_samples);
+    M5.Display.printf("Z=%d Y=%+d G=%lu", g_ui_joy_z ? 1 : 0, (int)g_ui_joy_y, (unsigned long)g_ui_freezer_grain_samples);
     M5.Display.fillRect(0, g_disp_ctrl_y + g_disp_line_h, M5.Display.width(), g_disp_line_h, BLACK);
     M5.Display.setCursor(0, g_disp_ctrl_y + g_disp_line_h);
-    M5.Display.printf("Y=%+d v=%+.2f", (int)g_ui_joy_y, (double)g_dj_filter_target_value);
+    M5.Display.printf("X=%+d v=%+.2f", (int)g_ui_joy_x, (double)g_dj_filter_target_value);
     control_stats_note_us(g_control_stats.display_us_min, g_control_stats.display_us_max, g_control_stats.display_us_sum,
                           (uint32_t)micros() - section_start_us);
     g_control_stats.display_update_count++;

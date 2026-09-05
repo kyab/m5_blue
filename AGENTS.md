@@ -95,3 +95,12 @@ There is no separate product named "Cursor web env setup agent" in the docs; env
   asymmetry vs ROUT1 may still occur on other Module Audio units or if that
   routing is changed; see `docs/Module-Audio-LOUT1-hiss-investigation.md`
   (Japanese) for the original evidence and measurements.
+
+
+## ADR (Architecture Decision Record)
+Refer docs/ADR.md
+For coding, dont repeat ADR mentioned things in comments.
+
+## Agent chat/conversation
+Please ask user if there are uncertain things, rather than guess too much.
+
