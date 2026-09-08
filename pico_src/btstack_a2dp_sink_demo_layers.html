@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>A2DP Sink Demo — Bluetooth レイヤ構造</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a2332;
+      --surface2: #243044;
+      --border: #2d3f56;
+      --text: #e6edf3;
+      --muted: #8b9cb3;
+      --accent: #58a6ff;
+      --accent2: #3fb950;
+      --warn: #d29922;
+      --profile: #bc8cff;
+      --gap: #f778ba;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Segoe UI", "Hiragino Sans", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 2rem 1.5rem 4rem;
+    }
+
+    .container { max-width: 960px; margin: 0 auto; }
+
+    header {
+      margin-bottom: 2.5rem;
+      padding-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    h2 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin: 2.5rem 0 1rem;
+      color: var(--accent);
+    }
+
+    h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin: 1.5rem 0 0.75rem;
+    }
+
+    /* Layer stack diagram */
+    .layer-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      margin: 1.5rem 0;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+
+    .layer {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 1rem;
+      padding: 1rem 1.25rem;
+      background: var(--surface);
+      border-left: 4px solid var(--accent);
+      align-items: start;
+    }
+
+    .layer:nth-child(1) { border-left-color: #f85149; }
+    .layer:nth-child(2) { border-left-color: var(--accent); }
+    .layer:nth-child(3) { border-left-color: var(--accent2); }
+    .layer:nth-child(4) { border-left-color: var(--profile); }
+    .layer:nth-child(5) { border-left-color: var(--gap); }
+
+    .layer-label {
+      font-weight: 700;
+      font-size: 0.85rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .layer-body h4 {
+      font-size: 1.05rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .layer-body .fullname {
+      color: var(--accent);
+      font-size: 0.9rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .layer-body .role {
+      font-size: 0.9rem;
+      color: var(--text);
+    }
+
+    .layer-body .demo-fn {
+      margin-top: 0.5rem;
+      font-family: "SF Mono", "Consolas", monospace;
+      font-size: 0.8rem;
+      color: var(--warn);
+      background: var(--surface2);
+      padding: 0.35rem 0.6rem;
+      border-radius: 4px;
+      display: inline-block;
+    }
+
+    /* Table */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+      margin: 1rem 0;
+      background: var(--surface);
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+
+    th, td {
+      padding: 0.75rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--surface2);
+      font-weight: 600;
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    tr:last-child td { border-bottom: none; }
+
+    td code {
+      font-family: "SF Mono", "Consolas", monospace;
+      font-size: 0.82rem;
+      background: var(--surface2);
+      padding: 0.15rem 0.4rem;
+      border-radius: 3px;
+      color: var(--warn);
+    }
+
+    .abbr { font-weight: 700; color: var(--accent); white-space: nowrap; }
+
+    /* Flow diagram */
+    .flow {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin: 1.5rem 0;
+      font-family: "SF Mono", "Consolas", monospace;
+      font-size: 0.82rem;
+      line-height: 1.8;
+      overflow-x: auto;
+      white-space: pre;
+      color: var(--muted);
+    }
+
+    .flow .step { color: var(--text); }
+    .flow .layer-name { color: var(--accent); }
+    .flow .arrow { color: var(--muted); }
+
+    /* Cards for profiles */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+      margin: 1rem 0;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem;
+    }
+
+    .card h4 {
+      font-size: 1rem;
+      margin-bottom: 0.35rem;
+    }
+
+    .card .fullname {
+      color: var(--profile);
+      font-size: 0.85rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .card ul {
+      margin-left: 1.2rem;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+
+    .card ul li { margin-bottom: 0.35rem; }
+    .card ul li strong { color: var(--text); }
+
+    footer {
+      margin-top: 3rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <header>
+      <h1>A2DP Sink Demo — Bluetooth レイヤ構造</h1>
+      <p class="subtitle">
+        <code>a2dp_sink_demo.c</code> の <code>setup_demo()</code> で初期化される各プロトコルの
+        略称・正式名称・役割を整理したリファレンス
+      </p>
+    </header>
+
+    <!-- ========== Layer Stack ========== -->
+    <h2>レイヤ構造（下から上）</h2>
+    <p style="color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem;">
+      Bluetooth Classic スタックは OSI モデルに似た階層構造。下位層が上位層の「運搬路」を提供する。
+    </p>
+
+    <div class="layer-stack">
+
+      <div class="layer">
+        <div class="layer-label">Layer 1<br>Radio</div>
+        <div class="layer-body">
+          <h4>物理層（ハードウェア）</h4>
+          <p class="fullname">— Bluetooth Radio / Baseband</p>
+          <p class="role">
+            2.4 GHz 帯での RF 送受信。Pico では CYW43439 等の Bluetooth コントローラ IC が担当。
+            このデモの C コードからは直接触らない。
+          </p>
+        </div>
+      </div>
+
+      <div class="layer">
+        <div class="layer-label">Layer 2<br>HCI</div>
+        <div class="layer-body">
+          <h4>HCI</h4>
+          <p class="fullname">Host Controller Interface</p>
+          <p class="role">
+            ホスト（Pico / BTstack）と Bluetooth コントローラ間の標準インターフェース。
+            コマンド送信・イベント受信（ペアリング要求、接続完了など）を担う。
+          </p>
+          <span class="demo-fn">hci_add_event_handler(&amp;hci_packet_handler)</span>
+        </div>
+      </div>
+
+      <div class="layer">
+        <div class="layer-label">Layer 3<br>L2CAP</div>
+        <div class="layer-body">
+          <h4>L2CAP</h4>
+          <p class="fullname">Logical Link Control and Adaptation Protocol</p>
+          <p class="role">
+            ACL リンク上に「論理チャンネル（パイプ）」を作成・管理する。
+            A2DP 音声、AVRCP コマンド、SDP 問い合わせはすべて L2CAP チャンネル上を流れる。
+          </p>
+          <span class="demo-fn">l2cap_init()</span>
+        </div>
+      </div>
+
+      <div class="layer">
+        <div class="layer-label">Layer 4<br>Profiles</div>
+        <div class="layer-body">
+          <h4>SDP / A2DP / AVRCP</h4>
+          <p class="fullname">
+            Service Discovery Protocol /
+            Advanced Audio Distribution Profile /
+            Audio/Video Remote Control Profile
+          </p>
+          <p class="role">
+            アプリケーションに近いプロファイル層。SDP はサービス目録、A2DP は音声ストリーム、
+            AVRCP は再生操作・メタデータを担当する。
+          </p>
+          <span class="demo-fn">sdp_init() / a2dp_sink_init() / avrcp_*_init()</span>
+        </div>
+      </div>
+
+      <div class="layer">
+        <div class="layer-label">Cross-cutting<br>GAP</div>
+        <div class="layer-body">
+          <h4>GAP</h4>
+          <p class="fullname">Generic Access Profile</p>
+          <p class="role">
+            デバイスの「見え方」を制御する横断的プロファイル。
+            デバイス名、Class of Device、discoverable 設定、リンクポリシー、ペアリング応答を担う。
+          </p>
+          <span class="demo-fn">gap_set_local_name() / gap_discoverable_control(1)</span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ========== Full name table ========== -->
+    <h2>略称・正式名称・役割 一覧</h2>
+
+    <table>
+      <thead>
+        <tr>
+          <th>略称</th>
+          <th>正式名称</th>
+          <th>役割</th>
+          <th>デモでの API</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="abbr">HCI</td>
+          <td>Host Controller Interface</td>
+          <td>ホスト ↔ コントローラ間の命令・イベント中継。ペアリング確認（SSP 数値確認）を受け取る入口。</td>
+          <td><code>hci_add_event_handler()</code></td>
+        </tr>
+        <tr>
+          <td class="abbr">L2CAP</td>
+          <td>Logical Link Control and Adaptation Protocol</td>
+          <td>ACL リンク上の論理チャンネル管理。上位プロトコルの「運搬路」。</td>
+          <td><code>l2cap_init()</code></td>
+        </tr>
+        <tr>
+          <td class="abbr">SDP</td>
+          <td>Service Discovery Protocol</td>
+          <td>「このデバイスは何ができるか」を問い合わせるサービス目録。接続前に相手が読む名刺帳。</td>
+          <td><code>sdp_init()</code><br><code>sdp_register_service()</code></td>
+        </tr>
+        <tr>
+          <td class="abbr">A2DP</td>
+          <td>Advanced Audio Distribution Profile</td>
+          <td>圧縮音声のストリーミング。Source = 送信側、Sink = 受信側（このデモ）。</td>
+          <td><code>a2dp_sink_init()</code><br><code>a2dp_sink_create_stream_endpoint()</code></td>
+        </tr>
+        <tr>
+          <td class="abbr">AVDTP</td>
+          <td>Audio/Video Distribution Transport Protocol</td>
+          <td>A2DP の下位トランスポート。ストリーム確立・コーデック交渉・メディア転送を担う（A2DP 内部で使用）。</td>
+          <td>—（A2DP API 経由）</td>
+        </tr>
+        <tr>
+          <td class="abbr">AVRCP</td>
+          <td>Audio/Video Remote Control Profile</td>
+          <td>再生操作（play/pause/skip）とメタデータ（曲名・アーティスト）のやり取り。</td>
+          <td><code>avrcp_init()</code><br><code>avrcp_controller_init()</code><br><code>avrcp_target_init()</code></td>
+        </tr>
+        <tr>
+          <td class="abbr">GAP</td>
+          <td>Generic Access Profile</td>
+          <td>デバイス名・Class of Device・discoverable・リンクポリシー・ペアリング応答。</td>
+          <td><code>gap_set_local_name()</code><br><code>gap_set_class_of_device()</code><br><code>gap_discoverable_control()</code></td>
+        </tr>
+        <tr>
+          <td class="abbr">SBC</td>
+          <td>Subband Coding</td>
+          <td>A2DP 必須の音声コーデック。bitpool（2–53）で品質／ビットレートを決定。</td>
+          <td><code>media_sbc_codec_capabilities[]</code></td>
+        </tr>
+        <tr>
+          <td class="abbr">PnP / Device ID</td>
+          <td>Plug and Play / Device Identification</td>
+          <td>ベンダー ID・製品 ID を SDP 経由で公開。OS がドライバを選ぶ際の参考情報。</td>
+          <td><code>device_id_create_sdp_record()</code></td>
+        </tr>
+        <tr>
+          <td class="abbr">SSP</td>
+          <td>Secure Simple Pairing</td>
+          <td>Bluetooth Core 2.1 以降のペアリング方式。数値確認（Just Works / Numeric Comparison）。</td>
+          <td><code>gap_ssp_confirmation_response()</code></td>
+        </tr>
+        <tr>
+          <td class="abbr">CoD</td>
+          <td>Class of Device</td>
+          <td>24 ビットのデバイス分類コード。Inquiry 時に「ヘッドホン」等と表示される。</td>
+          <td><code>gap_set_class_of_device(0x240400)</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- ========== A2DP / AVRCP roles ========== -->
+    <h2>プロファイル内の役割</h2>
+
+    <div class="cards">
+
+      <div class="card">
+        <h4>A2DP — Source / Sink</h4>
+        <p class="fullname">Advanced Audio Distribution Profile</p>
+        <ul>
+          <li><strong>Source</strong> — 音を送る側（スマホ、PC）</li>
+          <li><strong>Sink</strong> — 音を受け取る側（ヘッドホン、スピーカ）← このデモ</li>
+          <li>コーデック: <strong>SBC</strong>（Subband Coding）のみサポート</li>
+          <li>bitpool 2–53: 品質／ビットレートの交渉範囲</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h4>AVRCP — Controller / Target</h4>
+        <p class="fullname">Audio/Video Remote Control Profile</p>
+        <ul>
+          <li><strong>Controller</strong> — リモコン側。play/pause/skip 送信、曲情報取得 ← このデモも登録</li>
+          <li><strong>Target</strong> — 操作される側。volume up/down 受信 ← このデモも登録</li>
+          <li>Category 1: Player/Recorder（再生操作）</li>
+          <li>Category 2: Monitor/Amplifier（音量操作）</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h4>SDP レコード（4 枚登録）</h4>
+        <p class="fullname">Service Discovery Protocol Records</p>
+        <ul>
+          <li><strong>A2DP Sink</strong> — 音声受信可能（HEADPHONE 機能マスク）</li>
+          <li><strong>AVRCP Controller</strong> — 再生操作を送れる</li>
+          <li><strong>AVRCP Target</strong> — 音量操作を受け取れる</li>
+          <li><strong>Device ID (PnP)</strong> — ベンダー/製品識別情報</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h4>GAP 設定</h4>
+        <p class="fullname">Generic Access Profile</p>
+        <ul>
+          <li><strong>デバイス名</strong> — "A2DP Sink Demo"（ペアリング一覧に表示）</li>
+          <li><strong>CoD 0x240400</strong> — Audio + Rendering / Headphone</li>
+          <li><strong>discoverable</strong> — Inquiry Scan 有効（新規スキャンに表示）</li>
+          <li><strong>Role Switch 許可</strong> — スマホ側が Master になれる</li>
+        </ul>
+      </div>
+
+    </div>
+
+    <!-- ========== Connection flow ========== -->
+    <h2>接続シーケンス（用語をつなぐ）</h2>
+
+    <div class="flow"><span class="step">1.</span> <span class="layer-name">GAP</span>  <span class="arrow">→</span> "A2DP Sink Demo" / CoD=Headphone / discoverable=ON
+<span class="step">2.</span> スマホ <span class="arrow">→</span> <span class="layer-name">Inquiry</span>（GAP 経由でデバイス発見）
+<span class="step">3.</span> スマホ <span class="arrow">→</span> <span class="layer-name">SDP</span> 問い合わせ（A2DP Sink / AVRCP / Device ID を確認）
+<span class="step">4.</span> <span class="layer-name">HCI</span> <span class="arrow">→</span> ペアリング（SSP 数値確認 → hci_packet_handler）
+<span class="step">5.</span> <span class="layer-name">L2CAP</span> <span class="arrow">→</span> チャンネル確立（A2DP 用 / AVRCP 用）
+<span class="step">6.</span> <span class="layer-name">A2DP</span> <span class="arrow">→</span> ストリーム確立 + SBC コーデック交渉（bitpool 2–53）
+<span class="step">7.</span> <span class="layer-name">AVRCP</span> <span class="arrow">→</span> 再生操作・メタデータのやり取り開始
+<span class="step">8.</span> <span class="layer-name">L2CAP</span> <span class="arrow">→</span> SBC フレームが流れ始める（handle_l2cap_media_data_packet）</div>
+
+    <!-- ========== CoD breakdown ========== -->
+    <h2>Class of Device — 0x240400 の内訳</h2>
+
+    <table>
+      <thead>
+        <tr>
+          <th>フィールド</th>
+          <th>ビット位置</th>
+          <th>値</th>
+          <th>意味</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Service Class</td>
+          <td>bit 13, 21</td>
+          <td><code>0x002000 | 0x000020</code></td>
+          <td>Rendering (21) + Audio (13)</td>
+        </tr>
+        <tr>
+          <td>Major Device Class</td>
+          <td>bit 8–12</td>
+          <td><code>0x04</code></td>
+          <td>Audio/Video</td>
+        </tr>
+        <tr>
+          <td>Minor Device Class</td>
+          <td>bit 2–7</td>
+          <td><code>0x00</code></td>
+          <td>Headphones（ヘッドホン）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <footer>
+      参照: <code>lib/btstack/example/a2dp_sink_demo.c</code> — <code>setup_demo()</code> (L263–378)
+    </footer>
+
+  </div>
+</body>
+</html>
