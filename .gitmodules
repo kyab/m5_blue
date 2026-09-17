@@ -6,3 +6,6 @@
 	path = Module-Audio
 	url = https://github.com/kyab/M5Module-Audio.git
 	branch = custom
+[submodule "pico_src/first/pico-extras"]
+	path = pico_src/first/pico-extras
+	url = https://github.com/raspberrypi/pico-extras.git
