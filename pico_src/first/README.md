@@ -34,15 +34,14 @@ git submodule update --init --recursive -- pico_src/first/pico-extras
 ```
 
 ## Build
+Assuming Pico SDK is installed alongside with [Raspberry Pi Pico Visual Studio Code extension](https://marketplace.visualstudio.com/items?itemName=raspberry-pi.raspberry-pi-pico).
+
 
 ```sh
 cd pico_src/first
 export PICO_SDK_PATH="$HOME/.pico-sdk/sdk/2.3.1"
-export PICO_TOOLCHAIN_PATH="$HOME/.pico-sdk/toolchain/15_2_Rel1"
-export PATH="$PICO_TOOLCHAIN_PATH/bin:$PATH"
-
-cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w \
-  -DPICO_EXTRAS_PATH="$PWD/pico-extras"
+export PATH="$HOME/.pico-sdk/cmake/v4.3.4/CMake.app/Contents/bin:$HOME/.pico-sdk/ninja/v1.13.2:$HOME/.pico-sdk/toolchain/15_2_Rel1/bin:$PATH"
+cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPICO_EXTRAS_PATH="$PWD/pico-extras"
 cmake --build build --target a2dp_sink_demo
 ```
 
