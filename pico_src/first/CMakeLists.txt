@@ -79,7 +79,9 @@ target_include_directories(a2dp_sink_demo PRIVATE
 
 # Pimoroni Pico Audio Pack: DATA=GP9, BCK=GP10, LRCK=GP11 (CLOCK_PIN_BASE+1).
 # MUTE=GP22 is unused by this demo / pico_audio_i2s path, so omit.
+# USING_I2C is the upstream demo flag name that enables the I2S audio sink wiring.
 target_compile_definitions(a2dp_sink_demo PRIVATE
+    USING_I2C=1
     PICO_AUDIO_I2S_DATA_PIN=9
     PICO_AUDIO_I2S_CLOCK_PIN_BASE=10
 )
