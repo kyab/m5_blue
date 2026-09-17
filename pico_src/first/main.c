@@ -11,7 +11,9 @@
 // Implemented in pico-sdk/lib/btstack/example/a2dp_sink_demo.c
 int btstack_main(int argc, const char *argv[]);
 
+#if USING_I2C
 const btstack_audio_sink_t *btstack_audio_pico_sink_get_instance(void);
+#endif
 
 // Used by some BTstack examples to toggle the board LED.
 void hal_led_toggle(void) {
@@ -27,7 +29,10 @@ int main() {
         panic("failed to cyw43");
     }
 
+#if USING_I2C
     btstack_audio_sink_set_instance(btstack_audio_pico_sink_get_instance());
+#endif
+
     btstack_main(0, NULL);
     btstack_run_loop_execute();
 
