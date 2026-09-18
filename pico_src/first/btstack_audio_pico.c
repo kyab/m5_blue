@@ -51,6 +51,8 @@
 #include "btstack_run_loop.h"
 
 #include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <hardware/dma.h>
 
 #include "pico/audio_i2s.h"
@@ -73,6 +75,8 @@ static audio_format_t        btstack_audio_pico_audio_format;
 static audio_buffer_format_t btstack_audio_pico_producer_format;
 static audio_buffer_pool_t * btstack_audio_pico_audio_buffer_pool;
 static uint8_t               btstack_audio_pico_channel_count;
+// AVRCP absolute volume 0..127; default full until host sets volume
+static uint8_t               btstack_audio_pico_volume = 127;
 
 static audio_buffer_pool_t *init_audio(uint32_t sample_frequency, uint8_t channel_count) {
 
@@ -119,6 +123,22 @@ static void btstack_audio_pico_sink_fill_buffers(void){
         int16_t * buffer16 = (int16_t *) audio_buffer->buffer->bytes;
         (*playback_callback)(buffer16, audio_buffer->max_sample_count, 0);
 
+        // Apply AVRCP volume (same scaling as PicoW_A2DP): gain = (1+volume)/128
+        {
+            int32_t volume = 1L + btstack_audio_pico_volume; // 1..128
+            int32_t samples = (int32_t)audio_buffer->max_sample_count * btstack_audio_pico_channel_count;
+            for (int32_t i = 0; i < samples; ++i) {
+                int32_t sample = (volume * buffer16[i]) >> 7;
+                if (sample < INT16_MIN) {
+                    buffer16[i] = (int16_t)INT16_MIN;
+                } else if (sample > INT16_MAX) {
+                    buffer16[i] = (int16_t)INT16_MAX;
+                } else {
+                    buffer16[i] = (int16_t)sample;
+                }
+            }
+        }
+
         // duplicate samples for mono
         if (btstack_audio_pico_channel_count == 1){
             int16_t i;
@@ -160,7 +180,8 @@ static int btstack_audio_pico_sink_init(
 }
 
 static void btstack_audio_pico_sink_set_volume(uint8_t volume){
-    UNUSED(volume);
+    printf("set volume: %d\n", volume);
+    btstack_audio_pico_volume = volume;
 }
 
 static void btstack_audio_pico_sink_start_stream(void){

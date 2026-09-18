@@ -46,3 +46,21 @@ cmake --build build --target a2dp_sink_demo
 ```
 
 Outputs: `build/a2dp_sink_demo.uf2` / `.elf`.
+
+## Data Structure
+
+- BTStack RingBuffer
+  1. sbc_frame_ring_buffer: SBC frames.
+  2. decoded_audio_ring_buffer : Decoded PCM datas.
+
+- Pico Audio Pool
+  1. Producer Pool 
+  audio_new_producer_pool(..., 3, SAMPLES_PER_BUFFER=512). 
+  
+  Application side is responsible for take->fill->give.
+  Currently implemented in btstack_audio_pico_sink_fill_buffers(), fired every 5ms by BTStack timer.
+
+  2. Consumer Pool 
+  connect_extra(..., buffer_count=2, samples=256).
+
+  ProducerとConsumerは接続されているが、それぞれがBuffer Poolをサイズ x 個数もつ。
