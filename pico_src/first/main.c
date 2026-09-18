@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
+ #include <stdio.h>
+
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
 #include "btstack.h"
@@ -24,6 +26,8 @@ void hal_led_toggle(void) {
 
 int main() {
     stdio_init_all();
+
+    printf("main started\n");
 
     if (cyw43_arch_init() != PICO_OK) {
         panic("failed to cyw43");
