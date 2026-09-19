@@ -58,19 +58,21 @@ endif()
 # See https://bluekitchen-gmbh.com/btstack/#examples/examples/#sec:a2dpsinkdemoExample
 # Source a2dp_sink_demo.c lives in pico-sdk/lib/btstack/example/
 add_executable(a2dp_sink_demo
-    main.c
+    main.cpp
     btstack_audio_pico.c
     ${PICO_BTSTACK_PATH}/example/a2dp_sink_demo.c
 )
 
 target_link_libraries(a2dp_sink_demo PRIVATE
     pico_stdlib
+    pico_multicore
     pico_cyw43_arch_none
     pico_btstack_cyw43
     pico_btstack_ble
     pico_btstack_classic
     pico_btstack_sbc_decoder
     pico_audio_i2s
+    hardware_i2c
 )
 
 target_include_directories(a2dp_sink_demo PRIVATE

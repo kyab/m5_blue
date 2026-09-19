@@ -102,5 +102,12 @@ Refer docs/ADR.md
 For coding, dont repeat ADR mentioned things in comments.
 
 ## Agent chat/conversation
-Please ask user if there are uncertain things, rather than guess too much.
+### 質問と確認
+**「不明な点」「曖昧な要件」「複数の選択肢」がある状態での推測によるコード生成や実装を禁止します。**
+手戻りを防ぎ、正確な成果物を出すために、不確実な要素がある場合は必ず実装をストップし、ユーザーに質問・確認を行ってください。
+確認の質問の際には、あなたにおまかせするといった選択肢も用意して。その場合は適時適切な推測や仮説をたててすすめて。
+
+### 回答の規約
+**回答の最後に必ず使用したモデルを次の形式で明記して**
+回答 by : <モデル名>
 
