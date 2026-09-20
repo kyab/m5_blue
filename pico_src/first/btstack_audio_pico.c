@@ -30,7 +30,7 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * Please inquire about commercial licensing options at 
+ * Please inquire about commercial licensing options at
  * contact@bluekitchen-gmbh.com
  *
  */
@@ -56,30 +56,29 @@
 #include <hardware/dma.h>
 
 #include "pico/audio_i2s.h"
+#include "effects.h"
 
-#define DRIVER_POLL_INTERVAL_MS          5
+#define DRIVER_POLL_INTERVAL_MS 5
 #define SAMPLES_PER_BUFFER 512
 
 // client
-static void (*playback_callback)(int16_t * buffer, uint16_t num_samples, const btstack_audio_context_t * timeinfo);
+static void (*playback_callback)(int16_t *buffer, uint16_t num_samples, const btstack_audio_context_t *timeinfo);
 
 // timer to fill output ring buffer
-static btstack_timer_source_t  driver_timer_sink;
-
+static btstack_timer_source_t driver_timer_sink;
 
 static bool btstack_audio_pico_sink_active;
 
 // from pico-playground/audio/sine_wave/sine_wave.c
 
-static audio_format_t        btstack_audio_pico_audio_format;
+static audio_format_t btstack_audio_pico_audio_format;
 static audio_buffer_format_t btstack_audio_pico_producer_format;
-static audio_buffer_pool_t * btstack_audio_pico_audio_buffer_pool;
-static uint8_t               btstack_audio_pico_channel_count;
+static audio_buffer_pool_t *btstack_audio_pico_audio_buffer_pool;
+static uint8_t btstack_audio_pico_channel_count;
 // AVRCP absolute volume 0..127; default full until host sets volume
-static uint8_t               btstack_audio_pico_volume = 127;
+static uint8_t btstack_audio_pico_volume = 127;
 
 static audio_buffer_pool_t *init_audio(uint32_t sample_frequency, uint8_t channel_count) {
-
     // num channels requested by application
     btstack_audio_pico_channel_count = channel_count;
 
@@ -91,17 +90,17 @@ static audio_buffer_pool_t *init_audio(uint32_t sample_frequency, uint8_t channe
     btstack_audio_pico_producer_format.format = &btstack_audio_pico_audio_format;
     btstack_audio_pico_producer_format.sample_stride = 2 * 2;
 
-    audio_buffer_pool_t * producer_pool = audio_new_producer_pool(&btstack_audio_pico_producer_format, 3, SAMPLES_PER_BUFFER); // todo correct size
+    audio_buffer_pool_t *producer_pool = audio_new_producer_pool(&btstack_audio_pico_producer_format, 3, SAMPLES_PER_BUFFER); // todo correct size
 
     audio_i2s_config_t config;
-    config.data_pin       = PICO_AUDIO_I2S_DATA_PIN;
+    config.data_pin = PICO_AUDIO_I2S_DATA_PIN;
     config.clock_pin_base = PICO_AUDIO_I2S_CLOCK_PIN_BASE;
-    config.dma_channel    = (int8_t) dma_claim_unused_channel(true);
-    config.pio_sm         = 0;
+    config.dma_channel = (int8_t)dma_claim_unused_channel(true);
+    config.pio_sm = 0;
 
     // audio_i2s_setup claims the channel again https://github.com/raspberrypi/pico-extras/issues/48
     dma_channel_unclaim(config.dma_channel);
-    const audio_format_t * output_format = audio_i2s_setup(&btstack_audio_pico_audio_format, &config);
+    const audio_format_t *output_format = audio_i2s_setup(&btstack_audio_pico_audio_format, &config);
     if (!output_format) {
         panic("PicoAudio: Unable to open audio device.\n");
     }
@@ -113,15 +112,20 @@ static audio_buffer_pool_t *init_audio(uint32_t sample_frequency, uint8_t channe
     return producer_pool;
 }
 
-static void btstack_audio_pico_sink_fill_buffers(void){
-    while (true){
-        audio_buffer_t * audio_buffer = take_audio_buffer(btstack_audio_pico_audio_buffer_pool, false);
-        if (audio_buffer == NULL){
+static void btstack_audio_pico_sink_fill_buffers(void) {
+    while (true) {
+        audio_buffer_t *audio_buffer = take_audio_buffer(btstack_audio_pico_audio_buffer_pool, false);
+        if (audio_buffer == NULL) {
             break;
         }
 
-        int16_t * buffer16 = (int16_t *) audio_buffer->buffer->bytes;
+        int16_t *buffer16 = (int16_t *)audio_buffer->buffer->bytes;
         (*playback_callback)(buffer16, audio_buffer->max_sample_count, 0);
+
+        // Apply Effects.
+        if (btstack_audio_pico_channel_count == 2) {
+            apply_effects_before_i2s(buffer16, audio_buffer->max_sample_count);
+        }
 
         // Apply AVRCP volume (same scaling as PicoW_A2DP): gain = (1+volume)/128
         {
@@ -140,11 +144,11 @@ static void btstack_audio_pico_sink_fill_buffers(void){
         }
 
         // duplicate samples for mono
-        if (btstack_audio_pico_channel_count == 1){
+        if (btstack_audio_pico_channel_count == 1) {
             int16_t i;
-            for (i = SAMPLES_PER_BUFFER - 1 ; i >= 0; i--){
-                buffer16[2*i  ] = buffer16[i];
-                buffer16[2*i+1] = buffer16[i];
+            for (i = SAMPLES_PER_BUFFER - 1; i >= 0; i--) {
+                buffer16[2 * i] = buffer16[i];
+                buffer16[2 * i + 1] = buffer16[i];
             }
         }
 
@@ -153,8 +157,7 @@ static void btstack_audio_pico_sink_fill_buffers(void){
     }
 }
 
-static void driver_timer_handler_sink(btstack_timer_source_t * ts){
-
+static void driver_timer_handler_sink(btstack_timer_source_t *ts) {
     // refill
     btstack_audio_pico_sink_fill_buffers();
 
@@ -165,13 +168,12 @@ static void driver_timer_handler_sink(btstack_timer_source_t * ts){
 
 static int btstack_audio_pico_sink_init(
     uint8_t channels,
-    uint32_t samplerate, 
-    void (*playback)(int16_t * buffer, uint16_t num_samples, const btstack_audio_context_t * timeinfo)
-){
+    uint32_t samplerate,
+    void (*playback)(int16_t *buffer, uint16_t num_samples, const btstack_audio_context_t *timeinfo)) {
     btstack_assert(playback != NULL);
     btstack_assert(channels != 0);
 
-    playback_callback  = playback;
+    playback_callback = playback;
 
     if (!btstack_audio_pico_audio_buffer_pool) {
         btstack_audio_pico_audio_buffer_pool = init_audio(samplerate, channels);
@@ -179,13 +181,12 @@ static int btstack_audio_pico_sink_init(
     return 0;
 }
 
-static void btstack_audio_pico_sink_set_volume(uint8_t volume){
+static void btstack_audio_pico_sink_set_volume(uint8_t volume) {
     printf("set volume: %d\n", volume);
     btstack_audio_pico_volume = volume;
 }
 
-static void btstack_audio_pico_sink_start_stream(void){
-
+static void btstack_audio_pico_sink_start_stream(void) {
     // pre-fill HAL buffers
     btstack_audio_pico_sink_fill_buffers();
 
@@ -200,8 +201,7 @@ static void btstack_audio_pico_sink_start_stream(void){
     audio_i2s_set_enabled(true);
 }
 
-static void btstack_audio_pico_sink_stop_stream(void){
-
+static void btstack_audio_pico_sink_stop_stream(void) {
     audio_i2s_set_enabled(false);
 
     // stop timer
@@ -210,9 +210,9 @@ static void btstack_audio_pico_sink_stop_stream(void){
     btstack_audio_pico_sink_active = false;
 }
 
-static void btstack_audio_pico_sink_close(void){
+static void btstack_audio_pico_sink_close(void) {
     // stop stream if needed
-    if (btstack_audio_pico_sink_active){
+    if (btstack_audio_pico_sink_active) {
         btstack_audio_pico_sink_stop_stream();
     }
 }
@@ -225,6 +225,6 @@ static const btstack_audio_sink_t btstack_audio_pico_sink = {
     .close = &btstack_audio_pico_sink_close,
 };
 
-const btstack_audio_sink_t * btstack_audio_pico_sink_get_instance(void){
+const btstack_audio_sink_t *btstack_audio_pico_sink_get_instance(void) {
     return &btstack_audio_pico_sink;
 }
