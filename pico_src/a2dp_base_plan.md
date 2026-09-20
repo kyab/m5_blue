@@ -71,7 +71,7 @@ $ cmake --build build --target a2dp_sink_demo
 https://note.com/huge_donkey2654/n/n12859c76e44e
 I2Sについては自前のPIO実装を行っているようだ。
 
-2 Stars.
+2 Github Stars.
 
 # 結論
 公式pico_examplesのa2dp_sink_demoをベースにする。

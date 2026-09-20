@@ -52,13 +52,9 @@ class Joystick2 {
             if (!readBytes(kButtonReg, &data, 1)) {
                 continue;
             }
-            // Raw I2C is inverted vs physical feel on this unit; report 0=released, 1=pressed.
-            if (data == 1) {
-                *button_out = 0;
-                return true;
-            }
-            if (data == 0) {
-                *button_out = 1;
+            // Documented values (same as m5_blue): 0 = pressed, 1 = released.
+            if (data <= 1) {
+                *button_out = data;
                 return true;
             }
             return false;

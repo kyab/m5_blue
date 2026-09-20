@@ -90,6 +90,16 @@ target_compile_definitions(a2dp_sink_demo PRIVATE
 
 pico_add_extra_outputs(a2dp_sink_demo)
 
+# Run the toolchain size tool after every link.
+if (NOT CMAKE_SIZE)
+    get_filename_component(_pico_objcopy_dir "${CMAKE_OBJCOPY}" DIRECTORY)
+    find_program(CMAKE_SIZE NAMES arm-none-eabi-size llvm-size size HINTS "${_pico_objcopy_dir}" REQUIRED)
+endif()
+add_custom_command(TARGET a2dp_sink_demo POST_BUILD
+    COMMAND "${CMAKE_SIZE}" "$<TARGET_FILE:a2dp_sink_demo>"
+    VERBATIM
+)
+
 if (TARGET tinyusb_device)
     pico_enable_stdio_usb(a2dp_sink_demo 1)
     pico_enable_stdio_uart(a2dp_sink_demo 0)
