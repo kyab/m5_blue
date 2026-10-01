@@ -124,6 +124,10 @@ static void init_effects() {
 static Synth g_synth;
 static std::atomic<bool> g_synth_gate{false};
 
+// Larger than SAMPLES_PER_BUFFER (512) so a single fill covers typical I2S blocks.
+static constexpr uint32_t kSynthMixFrames = 1024;
+static int16_t g_synth_mix_buf[kSynthMixFrames * 2];
+
 // Y: 9 equal zones over full-scale [-4096, +4096]; y=0 is center of zone 4 (ソ).
 static const int kSynthPitchZones = 9;
 static const int kSynthZoneSemitones[kSynthPitchZones] = {0, 2, 4, 5, 7, 9, 11, 12, 14};
@@ -201,8 +205,29 @@ extern "C" void apply_effects_before_i2s(int16_t* data, uint32_t frame_count) {
         offset += n;
     }
 #elif defined(PARTY_PICO_MODE_SYNTH)
-    if (g_synth_gate.load(std::memory_order_relaxed)) {
-        g_synth.gen(data, frame_count);
+    if (!g_synth_gate.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    uint32_t offset = 0;
+    while (offset < frame_count) {
+        uint32_t n = frame_count - offset;
+        if (n > kSynthMixFrames) n = kSynthMixFrames;
+
+        g_synth.gen(g_synth_mix_buf, n);
+
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t dst = (offset + i) * 2;
+            int32_t l = static_cast<int32_t>(data[dst]) + static_cast<int32_t>(g_synth_mix_buf[i * 2]);
+            int32_t r = static_cast<int32_t>(data[dst + 1]) + static_cast<int32_t>(g_synth_mix_buf[i * 2 + 1]);
+            if (l > 32767) l = 32767;
+            else if (l < -32768) l = -32768;
+            if (r > 32767) r = 32767;
+            else if (r < -32768) r = -32768;
+            data[dst] = static_cast<int16_t>(l);
+            data[dst + 1] = static_cast<int16_t>(r);
+        }
+        offset += n;
     }
 #endif
 }

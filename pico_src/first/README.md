@@ -31,12 +31,6 @@ cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH   # def
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=DJ
 ```
 
-Host smoke check (no Pico SDK):
-
-```sh
-g++ -std=c++17 -O0 -o /tmp/host_synth_check host_synth_check.cpp && /tmp/host_synth_check
-```
-
 The A2DP application body is still taken from the Pico SDK BTstack tree
 (`$PICO_SDK_PATH/lib/btstack/example/a2dp_sink_demo.c`), not from pico-examples.
 

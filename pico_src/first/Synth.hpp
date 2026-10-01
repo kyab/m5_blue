@@ -8,8 +8,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// Monophonic sine synth mixed into interleaved stereo PCM (A2DP path).
-// Control thread publishes targets; gen() owns phase / applied pitch (audio thread).
+// Monophonic sine synth. gen() writes a fresh stereo buffer; mixing is done by the caller.
+// Control thread publishes pitch targets; gen() applies them and advances phase (audio thread).
 class Synth {
   public:
     // Low ド frequency. Swap to 130.81f (C3) or 523.25f (C5) as needed.
@@ -20,7 +20,6 @@ class Synth {
 
     Synth() {
         _requestedSemitone.store(kInitialSemitone, std::memory_order_relaxed);
-        _resetRequested.store(true, std::memory_order_relaxed);
         _appliedSemitone = kInitialSemitone;
         _phase = 0.0f;
         updatePhaseIncrement(kInitialSemitone);
@@ -31,21 +30,17 @@ class Synth {
         _requestedSemitone.store(semitone, std::memory_order_relaxed);
     }
 
-    // Reset pitch (to initial ソ) and phase. Intended on Z note-off.
+    // Reset pitch (to initial ソ) and phase. Call on Z note-off (not from gen).
     void reset() {
         _requestedSemitone.store(kInitialSemitone, std::memory_order_relaxed);
-        _resetRequested.store(true, std::memory_order_relaxed);
+        _appliedSemitone = kInitialSemitone;
+        _phase = 0.0f;
+        updatePhaseIncrement(kInitialSemitone);
     }
 
-    // Add mono sine into L and R. Caller gates on Z; do not call when silent.
+    // Fill interleaved stereo with mono sine (L=R). Does not mix; caller adds onto A2DP.
     void gen(int16_t* interleavedStereo, uint32_t frameCount) {
         if (interleavedStereo == nullptr || frameCount == 0) return;
-
-        if (_resetRequested.exchange(false, std::memory_order_relaxed)) {
-            _phase = 0.0f;
-            _appliedSemitone = kInitialSemitone;
-            updatePhaseIncrement(_appliedSemitone);
-        }
 
         const int target = _requestedSemitone.load(std::memory_order_relaxed);
         if (target != _appliedSemitone) {
@@ -58,22 +53,13 @@ class Synth {
         constexpr float kTwoPi = static_cast<float>(2.0 * M_PI);
 
         for (uint32_t i = 0; i < frameCount; ++i) {
-            const float s = sinf(_phase) * amp;
-            const int32_t add = static_cast<int32_t>(s);
-
-            int32_t l = static_cast<int32_t>(interleavedStereo[i * 2]) + add;
-            int32_t r = static_cast<int32_t>(interleavedStereo[i * 2 + 1]) + add;
-            if (l > 32767) l = 32767;
-            else if (l < -32768) l = -32768;
-            if (r > 32767) r = 32767;
-            else if (r < -32768) r = -32768;
-            interleavedStereo[i * 2] = static_cast<int16_t>(l);
-            interleavedStereo[i * 2 + 1] = static_cast<int16_t>(r);
-
+            const int16_t sample = static_cast<int16_t>(sinf(_phase) * amp);
+            interleavedStereo[i * 2] = sample;
+            interleavedStereo[i * 2 + 1] = sample;
             _phase += _phaseInc;
-            if (_phase >= kTwoPi) {
-                _phase -= kTwoPi;
-            }
+        }
+        while (_phase >= kTwoPi) {
+            _phase -= kTwoPi;
         }
     }
 
@@ -84,7 +70,6 @@ class Synth {
     }
 
     std::atomic<int> _requestedSemitone;
-    std::atomic<bool> _resetRequested;
     int _appliedSemitone;
     float _phase;
     float _phaseInc;
