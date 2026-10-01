@@ -212,14 +212,14 @@ extern "C" void apply_effects_before_i2s(int16_t* data, uint32_t frame_count) {
     uint32_t offset = 0;
     while (offset < frame_count) {
         uint32_t n = frame_count - offset;
-        if (n > kSynthMixFrames) n = kSynthMixFrames;
+        if (n > kSynthFrames) n = kSynthFrames;
 
-        g_synth.gen(g_synth_mix_buf, n);
+        g_synth.gen(g_synth_buf, n);
 
         for (uint32_t i = 0; i < n; ++i) {
             const uint32_t dst = (offset + i) * 2;
-            int32_t l = static_cast<int32_t>(data[dst]) + static_cast<int32_t>(g_synth_mix_buf[i * 2]);
-            int32_t r = static_cast<int32_t>(data[dst + 1]) + static_cast<int32_t>(g_synth_mix_buf[i * 2 + 1]);
+            int32_t l = static_cast<int32_t>(data[dst]) + static_cast<int32_t>(g_synth_buf[i * 2]);
+            int32_t r = static_cast<int32_t>(data[dst + 1]) + static_cast<int32_t>(g_synth_buf[i * 2 + 1]);
             if (l > 32767) l = 32767;
             else if (l < -32768) l = -32768;
             if (r > 32767) r = 32767;
