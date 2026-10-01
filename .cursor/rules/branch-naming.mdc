@@ -5,11 +5,13 @@ alwaysApply: true
 
 # Branch naming
 
-When creating a branch, use **`AGENTS.md` → Git branches**:
+When creating a branch, use **only** one of (**`AGENTS.md` → Git branches**):
 
 - `feat/<name>` — new feature
 - `fix/<name>` — bug fix
 - `docs/<name>` — documentation
 - `chore/<name>` — other small updates
+
+Do **not** open project PRs on auto-generated `cursor/...` branches. Rename or recreate with a compliant prefix before opening a PR (or open a new compliant branch/PR). Existing `cursor/` PRs should be migrated separately.
 
 If the prefix is unclear, ask before creating the branch.

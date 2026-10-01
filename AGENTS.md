@@ -32,12 +32,14 @@ Triggers that should cause the agent to consult Going-Zero on GitHub:
 
 ## Git branches
 
-When creating a new branch, use one of:
+When creating a new branch, use **only** one of:
 
 - `feat/<short-name>` — new feature
 - `fix/<short-name>` — bug fix
 - `docs/<short-name>` — documentation
 - `chore/<short-name>` — other small updates
+
+Do **not** open project PRs on auto-generated `cursor/...` branches. Rename or recreate with a compliant prefix before opening a PR (or open a new compliant branch/PR). Existing `cursor/` PRs should be migrated separately.
 
 If the prefix is unclear, ask before creating the branch.
 
