@@ -41,6 +41,8 @@ When creating a new branch, use **only** one of:
 
 Do **not** open project PRs on auto-generated `cursor/...` branches. Rename or recreate with a compliant prefix before opening a PR (or open a new compliant branch/PR). Existing `cursor/` PRs should be migrated separately.
 
+**Cloud Agent note:** Cursor Cloud runs may still inject a temporary `cursor/<name>-…` working-branch template. That platform instruction can override this file for *branch creation*; these docs do not change platform injection. For project PRs, still recreate onto `feat|fix|docs|chore` (or migrate the PR) before treating the change as merge-ready. Coordinators should require a compliant head in the task brief.
+
 If the prefix is unclear, ask before creating the branch.
 
 ## Pull requests
