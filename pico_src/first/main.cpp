@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -122,7 +121,6 @@ static void init_effects() {
 #elif defined(PARTY_PICO_MODE_SYNTH)
 
 static Synth g_synth;
-static std::atomic<bool> g_synth_gate{false};
 
 // Larger than SAMPLES_PER_BUFFER (512) so a single fill covers typical I2S blocks.
 static constexpr uint32_t kSynthFrames = 1024;
@@ -157,8 +155,7 @@ static int map_joystick2_x_to_accidental(int16_t x_offset) {
 }
 
 static void init_effects() {
-    g_synth_gate.store(false, std::memory_order_relaxed);
-    g_synth.reset();
+    g_synth.noteOff();
 }
 
 #endif
@@ -205,10 +202,7 @@ extern "C" void apply_effects_before_i2s(int16_t* data, uint32_t frame_count) {
         offset += n;
     }
 #elif defined(PARTY_PICO_MODE_SYNTH)
-    if (!g_synth_gate.load(std::memory_order_relaxed)) {
-        return;
-    }
-
+    // Always run gen() so Tail fade-out can finish after Z release.
     uint32_t offset = 0;
     while (offset < frame_count) {
         uint32_t n = frame_count - offset;
@@ -344,11 +338,11 @@ static void update_effects_from_joystick2() {
     if (gated) {
         g_synth.setSemitone(semitone);
     }
-    if (s_z_was_latched && !s_z_latched) {
-        g_synth_gate.store(false, std::memory_order_relaxed);
-        g_synth.reset();
-    } else {
-        g_synth_gate.store(gated, std::memory_order_relaxed);
+    if (!s_z_was_latched && gated) {
+        g_synth.setSemitone(semitone);
+        g_synth.noteOn();
+    } else if (s_z_was_latched && !s_z_latched) {
+        g_synth.noteOff();
     }
     s_z_was_latched = s_z_latched;
 
@@ -408,8 +402,7 @@ int main() {
 #if defined(PARTY_PICO_MODE_DJ)
         g_dj_filter_target_value = 0.0f;
 #elif defined(PARTY_PICO_MODE_SYNTH)
-        g_synth_gate.store(false, std::memory_order_relaxed);
-        g_synth.reset();
+        g_synth.noteOff();
 #endif
     }
 
