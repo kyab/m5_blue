@@ -1,0 +1,6 @@
+# Japanese wording
+
+When writing Japanese documentation, plans, or chat replies for this project:
+
+- Do **not** use「行程」to mean joystick throw, stick travel, or axis range.
+- Prefer「フルスケール」「軸レンジ」「可動範囲」「片側フルスケール」など instead.

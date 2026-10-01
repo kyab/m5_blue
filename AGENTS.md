@@ -28,6 +28,7 @@ Triggers that should cause the agent to consult Going-Zero on GitHub:
 - Source code comments: English.
 - Documentation (README.md etc.): English.
 - Chat responses to the user: Japanese (per user preference).
+- Japanese docs / plans / chat: avoid the word「行程」for joystick throw or axis range. Prefer「フルスケール」「軸レンジ」「可動範囲」「片側フルスケール」など.
 
 ## Git branches
 
