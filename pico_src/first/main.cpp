@@ -125,8 +125,8 @@ static Synth g_synth;
 static std::atomic<bool> g_synth_gate{false};
 
 // Larger than SAMPLES_PER_BUFFER (512) so a single fill covers typical I2S blocks.
-static constexpr uint32_t kSynthMixFrames = 1024;
-static int16_t g_synth_mix_buf[kSynthMixFrames * 2];
+static constexpr uint32_t kSynthFrames = 1024;
+static int16_t g_synth_buf[kSynthFrames * 2];
 
 // Y: 9 equal zones over full-scale [-4096, +4096]; y=0 is center of zone 4 (ソ).
 static const int kSynthPitchZones = 9;
