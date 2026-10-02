@@ -38,6 +38,7 @@ When creating a new branch, use one of:
 - `fix/<short-name>` — bug fix
 - `docs/<short-name>` — documentation
 - `chore/<short-name>` — other small updates
+- `refactor/<short-name>` - refactoring
 
 If the prefix is unclear, ask before creating the branch.
 
