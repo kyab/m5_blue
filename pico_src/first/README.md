@@ -16,9 +16,20 @@ The same file contents are also present at tag `sdk-2.3.0`.
 
 | This tree | Upstream path | Notes |
 | --- | --- | --- |
-| `main.c` | `bluetooth/btstack_examples/main.c` | Locally trimmed (WiFi / iperf paths removed); `USING_I2C` audio-sink wiring kept |
-| `btstack_audio_pico.c` | `bluetooth/btstack_examples/btstack_audio_pico.c` | Unchanged vs upstream |
+| `main.cpp` | `bluetooth/btstack_examples/main.c` | C++ entry; Joystick2 + effects/synth; `USING_I2C` audio-sink wiring kept |
+| `btstack_audio_pico.c` | `bluetooth/btstack_examples/btstack_audio_pico.c` | Volume + `apply_effects_before_i2s` hook |
 | `btstack_config.h` | `bluetooth/config/btstack_config_common.h` | Inlined here (upstream `a2dp_sink_demo/btstack_config.h` only `#include`s the common header) |
+| `Synth.hpp` | (local) | Joystick2 monophonic sine (default build mode) |
+
+### Build mode (`PARTY_PICO_MODE`)
+
+- **Default `SYNTH`**: Joystick2 Y → pitch zones, X → flat/sharp (±1 semitone), Z → gate; mixes into A2DP at `apply_effects_before_i2s`.
+- **`DJ`**: existing DJ Filter (X) + Freezer (Y grain, Z gate).
+
+```sh
+cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH   # default
+cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=DJ
+```
 
 The A2DP application body is still taken from the Pico SDK BTstack tree
 (`$PICO_SDK_PATH/lib/btstack/example/a2dp_sink_demo.c`), not from pico-examples.
