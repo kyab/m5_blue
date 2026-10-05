@@ -14,10 +14,17 @@
 #include "btstack.h"
 
 #include "joystick2.hpp"
+#include "effects.h"
+
+#if defined(PARTY_PICO_MODE_DJ)
 #include "RingBuffer.hpp"
 #include "Freezer.hpp"
 #include "DJFilter.hpp"
-#include "effects.h"
+#elif defined(PARTY_PICO_MODE_SYNTH)
+#include "Synth.hpp"
+#else
+#error "Define PARTY_PICO_MODE_SYNTH (default) or PARTY_PICO_MODE_DJ"
+#endif
 
 // Implemented in pico-sdk/lib/btstack/example/a2dp_sink_demo.c
 extern "C" int btstack_main(int argc, const char* argv[]);
@@ -29,9 +36,18 @@ extern "C" const btstack_audio_sink_t* btstack_audio_pico_sink_get_instance(void
 // Match M5 loop delay(2) so joystick debounce constants keep the same wall-clock timing.
 static constexpr uint32_t kJoystick2PollMs = 2;
 static constexpr uint32_t kJoystick2PrintMs = 200;
-static constexpr uint32_t kDjProcessFrames = 512; // matches SAMPLES_PER_BUFFER in btstack_audio_pico.c
 
 static Joystick2 g_joystick2;
+
+static const int16_t kJoystick2AxisOffsetFullScale = 4096;
+static const int16_t kJoystick2XChangeThreshold = 200;
+static const int16_t kAxisGlitchAbsPrev = 500;
+static const uint8_t kAxisZeroConfirm = 4;
+static const uint8_t kZReleaseConfirm = 12; // ~24 ms at loop delay(2)
+static const uint8_t kButtonReadFailureRelease = 12;
+
+#if defined(PARTY_PICO_MODE_DJ)
+static constexpr uint32_t kDjProcessFrames = 512; // matches SAMPLES_PER_BUFFER in btstack_audio_pico.c
 
 static RingBufferInterleaved* g_ring = nullptr;
 static Freezer g_freezer(nullptr);
@@ -41,9 +57,6 @@ static float g_dj_left[kDjProcessFrames];
 static float g_dj_right[kDjProcessFrames];
 
 static const float kDjFilterBypassDeadzone = 0.03f;
-
-static const int16_t kJoystick2AxisOffsetFullScale = 4096;
-static const int16_t kJoystick2XChangeThreshold = 200;
 static const int16_t kJoystick2XDeadbandPos = 30;
 static const int16_t kJoystick2XDeadbandNeg = -30;
 static const float kJoystick2FilterVHPFMin = 0.55f;
@@ -105,12 +118,82 @@ static void init_effects() {
     g_freezer.setRingBuffer(g_ring);
 }
 
-extern "C" void apply_effects_before_i2s(int16_t* data, uint32_t frame_count) {
-    static float s_applied_dj_filter_value = 0.0f;
+#elif defined(PARTY_PICO_MODE_SYNTH)
 
+static Synth g_synth;
+
+// Larger than SAMPLES_PER_BUFFER (512) so a single fill covers typical I2S blocks.
+static constexpr uint32_t kSynthFrames = 1024;
+static float g_synth_buf[kSynthFrames * 2];
+
+// Y: 9 equal zones over full-scale [-4096, +4096]; y=0 is center of zone 4 (G note).
+static const int kSynthPitchZones = 9;
+static const int kSynthZoneSemitones[kSynthPitchZones] = {0, 2, 4, 5, 7, 9, 11, 12, 14};
+// X: + : sharp, - : flat, 0(20% deadzone) : natural.
+static const int16_t kSynthXDeadzone = static_cast<int16_t>(0.2f * static_cast<float>(kJoystick2AxisOffsetFullScale));
+
+static int map_joystick2_y_to_base_semitone(int16_t y_offset) {
+    int32_t y = y_offset;
+    if (y < -kJoystick2AxisOffsetFullScale) {
+        y = -kJoystick2AxisOffsetFullScale;
+    } else if (y > kJoystick2AxisOffsetFullScale) {
+        y = kJoystick2AxisOffsetFullScale;
+    }
+    const int32_t span = static_cast<int32_t>(kJoystick2AxisOffsetFullScale) * 2;
+    int32_t pos = y + kJoystick2AxisOffsetFullScale;
+    if (pos < 0) pos = 0;
+    if (pos > span) pos = span;
+    int zone = static_cast<int>(pos / (static_cast<float>(span) / kSynthPitchZones));
+    if (zone >= kSynthPitchZones) zone = kSynthPitchZones - 1;
+    return kSynthZoneSemitones[zone];
+}
+
+static int map_joystick2_x_to_accidental(int16_t x_offset) {
+    if (x_offset < -kSynthXDeadzone) return -1;
+    if (x_offset > kSynthXDeadzone) return 1;
+    return 0;
+}
+
+static void init_effects() {
+}
+
+#endif
+
+extern "C" void apply_effects_before_i2s(float* data, uint32_t frame_count) {
     if (data == nullptr || frame_count == 0) return;
 
-    g_freezer.process(data, frame_count);
+#if defined(PARTY_PICO_MODE_DJ)
+    static float s_applied_dj_filter_value = 0.0f;
+    // Note that Freezer operates on int16 PCM; bridge without final output clip.
+    static int16_t s_freezer_i16[kDjProcessFrames * 2];
+
+    uint32_t freezer_offset = 0;
+    while (freezer_offset < frame_count) {
+        uint32_t n = frame_count - freezer_offset;
+        if (n > kDjProcessFrames) n = kDjProcessFrames;
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t src = (freezer_offset + i) * 2;
+            float l = data[src] * 32768.0f;
+            float r = data[src + 1] * 32768.0f;
+            if (l > 32767.0f)
+                l = 32767.0f;
+            else if (l < -32768.0f)
+                l = -32768.0f;
+            if (r > 32767.0f)
+                r = 32767.0f;
+            else if (r < -32768.0f)
+                r = -32768.0f;
+            s_freezer_i16[i * 2] = static_cast<int16_t>(l);
+            s_freezer_i16[i * 2 + 1] = static_cast<int16_t>(r);
+        }
+        g_freezer.process(s_freezer_i16, n);
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t dst = (freezer_offset + i) * 2;
+            data[dst] = static_cast<float>(s_freezer_i16[i * 2]) / 32768.0f;
+            data[dst + 1] = static_cast<float>(s_freezer_i16[i * 2 + 1]) / 32768.0f;
+        }
+        freezer_offset += n;
+    }
 
     float target_v = g_dj_filter_target_value;
     if (target_v != s_applied_dj_filter_value) {
@@ -124,32 +207,38 @@ extern "C" void apply_effects_before_i2s(int16_t* data, uint32_t frame_count) {
         if (n > kDjProcessFrames) n = kDjProcessFrames;
         for (uint32_t i = 0; i < n; i++) {
             const uint32_t src = (offset + i) * 2;
-            g_dj_left[i] = static_cast<float>(data[src]) / 32768.0f;
-            g_dj_right[i] = static_cast<float>(data[src + 1]) / 32768.0f;
+            g_dj_left[i] = data[src];
+            g_dj_right[i] = data[src + 1];
         }
         g_dj_filter.process(g_dj_left, g_dj_right, n);
         for (uint32_t i = 0; i < n; i++) {
-            float l = g_dj_left[i] * 32768.0f;
-            float r = g_dj_right[i] * 32768.0f;
-            if (l > 32767.0f)
-                l = 32767.0f;
-            else if (l < -32768.0f)
-                l = -32768.0f;
-            if (r > 32767.0f)
-                r = 32767.0f;
-            else if (r < -32768.0f)
-                r = -32768.0f;
             const uint32_t dst = (offset + i) * 2;
-            data[dst] = static_cast<int16_t>(l);
-            data[dst + 1] = static_cast<int16_t>(r);
+            data[dst] = g_dj_left[i];
+            data[dst + 1] = g_dj_right[i];
         }
         offset += n;
     }
+#elif defined(PARTY_PICO_MODE_SYNTH)
+    // Always run gen() so Head fade-in and Tail fade-out advance with the audio callback.
+    uint32_t offset = 0;
+    while (offset < frame_count) {
+        uint32_t n = frame_count - offset;
+        if (n > kSynthFrames) n = kSynthFrames;
+
+        g_synth.gen(g_synth_buf, n);
+
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t dst = (offset + i) * 2;
+            data[dst] += g_synth_buf[i * 2];
+            data[dst + 1] += g_synth_buf[i * 2 + 1];
+        }
+        offset += n;
+    }
+#endif
 }
 
-// X drives the DJ filter, Y sets the Freezer grain, and Z activates Freezer while held.
+// Shared Joystick2 debounce / glitch filter; mode-specific mapping at the end.
 static void update_effects_from_joystick2() {
-    float v = 0.0f;
     static uint8_t s_button = 1; // 1 = released
     static uint8_t s_button_read_failures = 0;
     static bool s_z_latched = false;
@@ -158,10 +247,9 @@ static void update_effects_from_joystick2() {
     static uint8_t s_x_zero_confirm = 0;
     static int16_t s_y_held = 0;
     static uint8_t s_y_zero_confirm = 0;
-    static const uint8_t kZReleaseConfirm = 12; // ~24 ms at loop delay(2)
-    static const uint8_t kButtonReadFailureRelease = 12;
-    static const int16_t kAxisGlitchAbsPrev = 500;
-    static const uint8_t kAxisZeroConfirm = 4;
+#if defined(PARTY_PICO_MODE_SYNTH)
+    static bool s_z_was_latched = false;
+#endif
 
     int16_t x_raw = 0;
     int16_t y_raw = 0;
@@ -236,8 +324,10 @@ static void update_effects_from_joystick2() {
 
     const int16_t x_used = s_x_held;
     const int16_t y_used = s_y_held;
+
+#if defined(PARTY_PICO_MODE_DJ)
     const uint32_t grainSamples = map_joystick2_y_offset_to_freezer_grain(y_used);
-    v = map_joystick2_x_offset_to_filter_v(x_used);
+    float v = map_joystick2_x_offset_to_filter_v(x_used);
     v = apply_dj_filter_target_value(v);
 
     g_freezer.setGrainSize(grainSamples);
@@ -250,6 +340,31 @@ static void update_effects_from_joystick2() {
         printf("joy x=%d y=%d z=%u v=%+.2f g=%lu\n",
                (int)x_raw, (int)y_raw, s_z_latched ? 1u : 0u, (double)v, (unsigned long)grainSamples);
     }
+#elif defined(PARTY_PICO_MODE_SYNTH)
+    const int base_semi = map_joystick2_y_to_base_semitone(y_used);
+    const int accidental = map_joystick2_x_to_accidental(x_used);
+    const int semitone = base_semi + accidental;
+    const bool gated = joystick_ok && s_z_latched;
+
+    if (gated) {
+        g_synth.setSemitone(semitone);
+    }
+    if (!s_z_was_latched && gated) {
+        g_synth.setSemitone(semitone);
+        g_synth.noteOn();
+    } else if (s_z_was_latched && !s_z_latched) {
+        g_synth.noteOff();
+    }
+    s_z_was_latched = s_z_latched;
+
+    static uint32_t s_last_print_ms = 0;
+    const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (now_ms - s_last_print_ms >= kJoystick2PrintMs) {
+        s_last_print_ms = now_ms;
+        printf("joy x=%d y=%d z=%u semi=%d (base=%d acc=%+d)\n",
+               (int)x_raw, (int)y_raw, s_z_latched ? 1u : 0u, semitone, base_semi, accidental);
+    }
+#endif
 }
 
 // Used by some BTstack examples to toggle the board LED.
@@ -270,10 +385,14 @@ static void core1_entry(void) {
 int main() {
     stdio_init_all();
 
-    // sleep for boot messages to be observed by user.
+    // delay for developers to check startup messages.
     sleep_ms(3000);
 
-    printf("main started\n");
+#if defined(PARTY_PICO_MODE_SYNTH)
+    printf("main started (PARTY_PICO_MODE_SYNTH)\n");
+#elif defined(PARTY_PICO_MODE_DJ)
+    printf("main started (PARTY_PICO_MODE_DJ)\n");
+#endif
 
     if (cyw43_arch_init() != PICO_OK) {
         panic("failed to cyw43");
@@ -291,7 +410,10 @@ int main() {
     if (g_joystick2.ok()) {
         multicore_launch_core1(core1_entry);
     } else {
+#if defined(PARTY_PICO_MODE_DJ)
         g_dj_filter_target_value = 0.0f;
+#elif defined(PARTY_PICO_MODE_SYNTH)
+#endif
     }
 
     btstack_run_loop_execute();

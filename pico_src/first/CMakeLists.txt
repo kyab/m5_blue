@@ -88,6 +88,14 @@ target_compile_definitions(a2dp_sink_demo PRIVATE
     PICO_AUDIO_I2S_CLOCK_PIN_BASE=10
 )
 
+# Effect switch : Default SYNTH. Use -DPARTY_PICO_MODE=DJ for DJ Filter + Freezer.
+set(PARTY_PICO_MODE "SYNTH" CACHE STRING "PARTY_PICO_MODE: SYNTH (default) or DJ")
+if (PARTY_PICO_MODE STREQUAL "DJ")
+    target_compile_definitions(a2dp_sink_demo PRIVATE PARTY_PICO_MODE_DJ=1)
+else()
+    target_compile_definitions(a2dp_sink_demo PRIVATE PARTY_PICO_MODE_SYNTH=1)
+endif()
+
 pico_add_extra_outputs(a2dp_sink_demo)
 
 # Run the toolchain size tool after every link.
