@@ -2,25 +2,20 @@
 
 Project-wide guidance for AI coding agents working in this repository.
 
-## Going-Zero Reference
+## ADR (Architecture Decision Record)
+Refer docs/ADR.md
+For coding, don't repeat ADR mentioned things in comments.
 
-Whenever the user asks to reference, port, match, or debug code based on **Going-Zero** (including but not limited to the DJ filter, other audio DSP blocks, UI behaviors, or any other component), consult the Going-Zero source on GitHub directly instead of guessing or relying on memory.
+## Agent chat/conversation
+### 質問と確認
+**「不明な点」「曖昧な要件」「複数の選択肢」がある状態での推測によるコード生成や実装を禁止します。**
+手戻りを防ぎ、正確な成果物を出すために、不確実な要素がある場合は必ず実装をストップし、ユーザーに質問・確認を行ってください。
+確認の質問の際には、あなたにおまかせするといった選択肢も用意して。その場合は適時適切な推測や仮説をたててすすめて。
 
-Note: Going-Zero is a separate, independent repository — this project is not a fork of it. Treat it as an external reference.
+### 回答の規約
+**回答の最後に必ず使用したモデルを次の形式で明記して**
+回答 by : <モデル名>
 
-- Reference repository: https://github.com/kyab/Going-Zero
-
-How to reference:
-
-- Prefer fetching the specific file from the Going-Zero repository on GitHub (raw URL via `WebFetch`, or the GitHub MCP) before writing or modifying related code in this repo.
-- When porting, keep behavior aligned with the reference implementation (coefficients, formulas, constants, parameter mappings, state machines, fade/anti-click handling, etc.).
-
-Triggers that should cause the agent to consult Going-Zero on GitHub:
-
-- The user says "Going-Zero を参考にして" / "Going-Zero と同じにして" / "Going-Zero から移植して" or similar.
-- Verifying that ported code (DJ filter, IIR filters, fader, etc.) matches the original.
-- Adding a new effect or feature that already exists in Going-Zero.
-- Debugging tonal, amplitude, or timing differences vs the original app.
 
 ## Coding Style
 
@@ -29,6 +24,9 @@ Triggers that should cause the agent to consult Going-Zero on GitHub:
 - Documentation (README.md etc.): English.
 - Chat responses to the user: Japanese (per user preference).
 - Japanese docs / plans / chat: avoid the word「行程」for joystick throw or axis range. Prefer「フルスケール」「軸レンジ」「可動範囲」「片側フルスケール」など.
+
+### Source code comments
+コメントは、コードや名前から読み取れない設計上の理由・仕様・不変条件・制約・注意点があるときだけ、簡潔に書いてください。動作の言い換えや、変数名・関数名・型名・構造から明らかな内容は書かないでください（例: `y_per_zone` があるなら「zone あたりの Y 幅で割っている」は不要）。追加・変更時は、コメントとコードの内容が一致していることを確認してください。
 
 ## Git branches
 
@@ -55,6 +53,26 @@ When adding or updating plots, charts, or other data graphics in this repository
 
 - **Color**: **Prioritize** a **universal color palette** (universal-design / colorblind-friendly schemes) so series remain distinguishable for readers with color-vision deficiencies. Well-known references include [Paul Tol’s notes](https://personal.sron.nl/~pault/) and the Okabe–Ito palette; match the toolchain you use (e.g. Matplotlib, Plotly) to an explicitly CVD-safe set rather than default rainbow or highly saturated-only schemes.
 - **More than color**: Do not rely on hue alone. Combine color with **line style** (e.g. solid, dashed, or dotted), **line width**, and **marker shape** (or distinct fill patterns where applicable) so each series or category stays identifiable in grayscale print and for low-vision readers.
+
+## Going-Zero Reference
+
+Whenever the user asks to reference, port, match, or debug code based on **Going-Zero** (including but not limited to the DJ filter, other audio DSP blocks, UI behaviors, or any other component), consult the Going-Zero source on GitHub directly instead of guessing or relying on memory.
+
+Note: Going-Zero is a separate, independent repository — this project is not a fork of it. Treat it as an external reference.
+
+- Reference repository: https://github.com/kyab/Going-Zero
+
+How to reference:
+
+- Prefer fetching the specific file from the Going-Zero repository on GitHub (raw URL via `WebFetch`, or the GitHub MCP) before writing or modifying related code in this repo.
+- When porting, keep behavior aligned with the reference implementation (coefficients, formulas, constants, parameter mappings, state machines, fade/anti-click handling, etc.).
+
+Triggers that should cause the agent to consult Going-Zero on GitHub:
+
+- The user says "Going-Zero を参考にして" / "Going-Zero と同じにして" / "Going-Zero から移植して" or similar.
+- Verifying that ported code (DJ filter, IIR filters, fader, etc.) matches the original.
+- Adding a new effect or feature that already exists in Going-Zero.
+- Debugging tonal, amplitude, or timing differences vs the original app.
 
 ## Build / Flash
 
@@ -97,19 +115,3 @@ There is no separate product named "Cursor web env setup agent" in the docs; env
   asymmetry vs ROUT1 may still occur on other Module Audio units or if that
   routing is changed; see `docs/Module-Audio-LOUT1-hiss-investigation.md`
   (Japanese) for the original evidence and measurements.
-
-
-## ADR (Architecture Decision Record)
-Refer docs/ADR.md
-For coding, dont repeat ADR mentioned things in comments.
-
-## Agent chat/conversation
-### 質問と確認
-**「不明な点」「曖昧な要件」「複数の選択肢」がある状態での推測によるコード生成や実装を禁止します。**
-手戻りを防ぎ、正確な成果物を出すために、不確実な要素がある場合は必ず実装をストップし、ユーザーに質問・確認を行ってください。
-確認の質問の際には、あなたにおまかせするといった選択肢も用意して。その場合は適時適切な推測や仮説をたててすすめて。
-
-### 回答の規約
-**回答の最後に必ず使用したモデルを次の形式で明記して**
-回答 by : <モデル名>
-

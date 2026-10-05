@@ -6,8 +6,8 @@
 extern "C" {
 #endif
 
-// Stereo interleaved PCM. frame_count is frames (L+R pairs), not int16 samples.
-void apply_effects_before_i2s(int16_t* data, uint32_t frame_count);
+// Stereo interleaved float PCM (nominal full scale ±1). frame_count is frames (L+R pairs).
+void apply_effects_before_i2s(float* data, uint32_t frame_count);
 
 #ifdef __cplusplus
 }

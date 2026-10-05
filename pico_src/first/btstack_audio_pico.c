@@ -118,28 +118,40 @@ static void btstack_audio_pico_sink_fill_buffers(void) {
         if (audio_buffer == NULL) {
             break;
         }
-
         int16_t *buffer16 = (int16_t *)audio_buffer->buffer->bytes;
         (*playback_callback)(buffer16, audio_buffer->max_sample_count, 0);
 
-        // Apply Effects.
-        if (btstack_audio_pico_channel_count == 2) {
-            apply_effects_before_i2s(buffer16, audio_buffer->max_sample_count);
+        // int16 A2DP -> float, effects/mix in float, volume, then clip to int16.
+        static float float_buf[SAMPLES_PER_BUFFER * 2];
+        const uint32_t frame_count = audio_buffer->max_sample_count;
+        const int32_t sample_count =
+            (int32_t)frame_count * (int32_t)btstack_audio_pico_channel_count;
+
+        for (int32_t i = 0; i < sample_count; ++i) {
+            float_buf[i] = (float)buffer16[i] / 32768.0f;
         }
 
-        // Apply AVRCP volume (same scaling as PicoW_A2DP): gain = (1+volume)/128
+        if (btstack_audio_pico_channel_count == 2) {
+            apply_effects_before_i2s(float_buf, frame_count);
+        }
+
+        // AVRCP volume (same scaling as PicoW_A2DP): gain = (1+volume)/128
         {
-            int32_t volume = 1L + btstack_audio_pico_volume; // 1..128
-            int32_t samples = (int32_t)audio_buffer->max_sample_count * btstack_audio_pico_channel_count;
-            for (int32_t i = 0; i < samples; ++i) {
-                int32_t sample = (volume * buffer16[i]) >> 7;
-                if (sample < INT16_MIN) {
-                    buffer16[i] = (int16_t)INT16_MIN;
-                } else if (sample > INT16_MAX) {
-                    buffer16[i] = (int16_t)INT16_MAX;
-                } else {
-                    buffer16[i] = (int16_t)sample;
+            const float volume_gain = (1.0f + (float)btstack_audio_pico_volume) / 128.0f;
+            for (int32_t i = 0; i < sample_count; ++i) {
+                float sample = float_buf[i] * volume_gain;
+                if (sample > 1.0f) {
+                    sample = 1.0f;
+                } else if (sample < -1.0f) {
+                    sample = -1.0f;
                 }
+                int32_t pcm = (int32_t)(sample * 32768.0f);
+                if (pcm > INT16_MAX) {
+                    pcm = INT16_MAX;
+                } else if (pcm < INT16_MIN) {
+                    pcm = INT16_MIN;
+                }
+                buffer16[i] = (int16_t)pcm;
             }
         }
 
