@@ -13,15 +13,16 @@
 // Voice state: Off / Head (50 ms fade-in after noteOn) / On / Tail (50 ms fade-out after noteOff).
 class Synth {
   public:
-    // Low C note frequency. Swap to 130.81f (C3) or 523.25f (C5) as needed.
-    static constexpr float kBaseFrequencyHz = 261.63f; // C4
+    // Low C note frequency. Change to 130.81f (C3) or 261.63f (C4) or 523.25f (C5).. as needed.
+    static constexpr float kBaseFrequencyHz = 130.81f; // C3
+
     static constexpr float kSampleRateHz = 44100.0f;
-    static constexpr float kLevel = 0.8f;
+    static constexpr float kLevel = 0.6f;
     static constexpr int kInitialSemitone = 7; // G note
     static constexpr uint32_t kFadeInSamples =
-        static_cast<uint32_t>(0.05f * kSampleRateHz); // 50 ms
+        static_cast<uint32_t>(0.05f * kSampleRateHz); // Attack time
     static constexpr uint32_t kFadeOutSamples =
-        static_cast<uint32_t>(0.05f * kSampleRateHz); // 50 ms
+        static_cast<uint32_t>(0.70f * kSampleRateHz); // Release time
     static constexpr float kFadeInStep = 1.0f / static_cast<float>(kFadeInSamples);
     static constexpr float kFadeOutStep = 1.0f / static_cast<float>(kFadeOutSamples);
 
