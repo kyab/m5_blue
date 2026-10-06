@@ -82,10 +82,13 @@ target_include_directories(a2dp_sink_demo PRIVATE
 # Pimoroni Pico Audio Pack: DATA=GP9, BCK=GP10, LRCK=GP11 (CLOCK_PIN_BASE+1).
 # MUTE=GP22 is unused by this demo / pico_audio_i2s path, so omit.
 # USING_I2C is the upstream demo flag name that enables the I2S audio sink wiring.
+# PICO_ENABLE_USB_RESET_VIA_BAUD_RATE: SDK 2.3.1 name (PICO_STDIO_USB_ENABLE_RESET_VIA_BAUD_RATE is <=2.2.0 alias).
+# Opening the USB CDC serial at PICO_USB_RESET_MAGIC_BAUD_RATE (1200) enters BOOTSEL without the button.
 target_compile_definitions(a2dp_sink_demo PRIVATE
     USING_I2C=1
     PICO_AUDIO_I2S_DATA_PIN=9
     PICO_AUDIO_I2S_CLOCK_PIN_BASE=10
+    PICO_ENABLE_USB_RESET_VIA_BAUD_RATE=1
 )
 
 # Effect switch: Default SYNTH_WITH_BUTTON. Use -DPARTY_PICO_MODE=SYNTH or DJ.

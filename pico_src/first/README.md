@@ -46,6 +46,47 @@ cmake --build build --target a2dp_sink_demo
 
 Outputs: `build/a2dp_sink_demo.uf2` / `.elf`.
 
+## Flash (no BOOTSEL button)
+
+USB stdio is enabled, and `PICO_ENABLE_USB_RESET_VIA_BAUD_RATE=1` is set in
+`CMakeLists.txt` (Pico SDK **2.3.1** name; the older
+`PICO_STDIO_USB_ENABLE_RESET_VIA_BAUD_RATE` still works as an alias). Opening the
+board’s USB serial at the magic baud (**1200**) resets into BOOTSEL so you can
+load a UF2 without holding BOOTSEL.
+
+### Option A — `picotool` (preferred)
+
+With the board already running this firmware (USB CDC enumerated):
+
+```sh
+# Force reboot into BOOTSEL, then load and reboot into the image
+picotool load -f build/a2dp_sink_demo.uf2
+# or: picotool load -f build/a2dp_sink_demo.elf && picotool reboot
+```
+
+`picotool load -f` uses the stdio USB reset path when the device is running;
+if the board is already in BOOTSEL, a plain `picotool load …` is enough.
+
+### Option B — open serial at 1200 baud, then copy UF2
+
+```sh
+# macOS example: find the CDC device, then open at 1200 (device reboots to BOOTSEL)
+ls /dev/cu.usbmodem*
+# Either of these triggers the magic baud reset:
+stty -f /dev/cu.usbmodem* 1200   # adjust glob to the real device name
+# or:  minicom -D /dev/cu.usbmodemXXXX -b 1200
+```
+
+After reset, a `RPI-RP2` (or RP2350) mass-storage volume appears; copy
+`build/a2dp_sink_demo.uf2` onto it, or run `picotool load build/a2dp_sink_demo.uf2`.
+
+### Verify baud-reset once
+
+1. Flash any build that includes the define above (BOOTSEL once if needed).
+2. Confirm USB serial is present (`ls /dev/cu.usbmodem*`).
+3. Open the port at 1200 baud (or `picotool reboot -f` / `picotool load -f …`).
+4. Board should leave the CDC port and appear as a UF2 drive / `picotool info` BOOTSEL device.
+
 ### Build mode (`PARTY_PICO_MODE`)
 
 - **Default `SYNTH_WITH_BUTTON`**: same Synth mix path as `SYNTH`, but Dual Button **Blue (GP7)** gates noteOn/noteOff (no software debounce). Joystick2 Y/X still set pitch while Blue is held. Joystick2 Z and Dual Button Red (GP6) are read-only (not printed). Blue works even if Joystick2 is missing.
