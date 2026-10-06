@@ -38,3 +38,11 @@ Notes:
   the soft-ramp bit (`DACSoftRamp`=1) is set. This matches the intent of the
   test: observe the noise floor of a *live* DAC/HP output under "digital zero"
   input rather than a hardware-muted output.
+
+### Pico USB Audio / MIDI / CDC probe (`pico_src/usb_audio_midi_probe`)
+
+Standalone Pico 2 W trial firmware that enumerates as **USB Audio** (UAC2
+speaker), **USB MIDI**, and **USB CDC** at the same time. It is a sample for
+host/device bring-up, not the M5Stack Core2 product firmware. See
+[`pico_src/usb_audio_midi_probe/README.md`](pico_src/usb_audio_midi_probe/README.md)
+for features, known USB Audio glitches, and build/flash notes.
