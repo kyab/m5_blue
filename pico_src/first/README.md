@@ -19,7 +19,7 @@ The same file contents are also present at tag `sdk-2.3.0`.
 | `main.cpp` | `bluetooth/btstack_examples/main.c` | C++ entry; Joystick2 + effects/synth; `USING_I2C` audio-sink wiring kept |
 | `btstack_audio_pico.c` | `bluetooth/btstack_examples/btstack_audio_pico.c` | Volume + `apply_effects_before_i2s` hook |
 | `btstack_config.h` | `bluetooth/config/btstack_config_common.h` | Inlined here (upstream `a2dp_sink_demo/btstack_config.h` only `#include`s the common header) |
-| `Synth.hpp` | (local) | Joystick2 monophonic sine (default build mode) |
+| `Synth.hpp` | (local) | Joystick2 monophonic sine (`SYNTH` / `SYNTH_WITH_BUTTON`) |
 
 
 ## Prerequisites
@@ -48,13 +48,37 @@ Outputs: `build/a2dp_sink_demo.uf2` / `.elf`.
 
 ### Build mode (`PARTY_PICO_MODE`)
 
-- **Default `SYNTH`**: Joystick2 Y → pitch zones, X → flat/sharp (±1 semitone), Z → gate; mixes into A2DP at `apply_effects_before_i2s`.
+- **Default `SYNTH_WITH_BUTTON`**: same Synth mix path as `SYNTH`, but Dual Button **Blue (GP7)** gates noteOn/noteOff (no software debounce). Joystick2 Y/X still set pitch while Blue is held. Joystick2 Z and Dual Button Red (GP6) are read-only (not printed). Blue works even if Joystick2 is missing.
+- **`SYNTH`**: Joystick2 Y → pitch zones, X → flat/sharp (±1 semitone), Z → gate; mixes into A2DP at `apply_effects_before_i2s`.
 - **`DJ`**: existing DJ Filter (X) + Freezer (Y grain, Z gate).
 
 ```sh
-cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH   # default
+cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w                         # default = SYNTH_WITH_BUTTON
+cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH_WITH_BUTTON
+cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=DJ
 ```
+
+#### Dual Button wiring (`SYNTH_WITH_BUTTON`)
+
+| Dual Button (Grove) | Pico 2W |
+| --- | --- |
+| Red (VCC) | **3V3** (not 5V) |
+| Black (GND) | GND |
+| Yellow (Red btn) | **GP6** (read-only) |
+| White (Blue btn) | **GP7** (gate) |
+
+Active-low; unit onboard 10 kΩ pull-ups to VCC. Firmware uses `GPIO_IN` only (no Pico internal pull-up).
+
+#### Control matrix
+
+| Input | `SYNTH_WITH_BUTTON` | `SYNTH` | `DJ` |
+| --- | --- | --- | --- |
+| Joystick2 Y | pitch 9 zones | pitch 9 zones | Freezer grain |
+| Joystick2 X | ♭ / ♮ / ♯ | ♭ / ♮ / ♯ | DJ Filter |
+| Joystick2 Z | read-only | gate | Freezer gate |
+| Dual Button Blue (GP7) | gate | — | — |
+| Dual Button Red (GP6) | read-only | — | — |
 
 The A2DP application body is still taken from the Pico SDK BTstack tree
 (`$PICO_SDK_PATH/lib/btstack/example/a2dp_sink_demo.c`), not from pico-examples.

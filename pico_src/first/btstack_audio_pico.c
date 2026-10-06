@@ -135,9 +135,9 @@ static void btstack_audio_pico_sink_fill_buffers(void) {
             apply_effects_before_i2s(float_buf, frame_count);
         }
 
-        // AVRCP volume (same scaling as PicoW_A2DP): gain = (1+volume)/128
+        // AVRCP volume
         {
-            const float volume_gain = (1.0f + (float)btstack_audio_pico_volume) / 128.0f;
+            const float volume_gain = btstack_audio_pico_volume / 127.0f;
             for (int32_t i = 0; i < sample_count; ++i) {
                 float sample = float_buf[i] * volume_gain;
                 if (sample > 1.0f) {

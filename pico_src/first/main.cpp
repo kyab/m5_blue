@@ -20,10 +20,10 @@
 #include "RingBuffer.hpp"
 #include "Freezer.hpp"
 #include "DJFilter.hpp"
-#elif defined(PARTY_PICO_MODE_SYNTH)
+#elif defined(PARTY_PICO_MODE_SYNTH) || defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON)
 #include "Synth.hpp"
 #else
-#error "Define PARTY_PICO_MODE_SYNTH (default) or PARTY_PICO_MODE_DJ"
+#error "Define PARTY_PICO_MODE_SYNTH_WITH_BUTTON (default), PARTY_PICO_MODE_SYNTH, or PARTY_PICO_MODE_DJ"
 #endif
 
 // Implemented in pico-sdk/lib/btstack/example/a2dp_sink_demo.c
@@ -118,7 +118,13 @@ static void init_effects() {
     g_freezer.setRingBuffer(g_ring);
 }
 
-#elif defined(PARTY_PICO_MODE_SYNTH)
+#elif defined(PARTY_PICO_MODE_SYNTH) || defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON)
+
+#if defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON)
+// M5Stack Unit Dual Button: Yellow=Red→GP6, White=Blue→GP7 (active-low, onboard 10k to 3V3).
+static constexpr uint kDualButtonRedGpio = 6;
+static constexpr uint kDualButtonBlueGpio = 7;
+#endif
 
 static Synth g_synth;
 
@@ -218,7 +224,7 @@ extern "C" void apply_effects_before_i2s(float* data, uint32_t frame_count) {
         }
         offset += n;
     }
-#elif defined(PARTY_PICO_MODE_SYNTH)
+#elif defined(PARTY_PICO_MODE_SYNTH) || defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON)
     // Always run gen() so Head fade-in and Tail fade-out advance with the audio callback.
     uint32_t offset = 0;
     while (offset < frame_count) {
@@ -237,8 +243,8 @@ extern "C" void apply_effects_before_i2s(float* data, uint32_t frame_count) {
 #endif
 }
 
-// Shared Joystick2 debounce / glitch filter; mode-specific mapping at the end.
-static void update_effects_from_joystick2() {
+// Shared input poll (Joystick2 + Dual Button when enabled); mode-specific mapping at the end.
+static void update_audio_parameters() {
     static uint8_t s_button = 1; // 1 = released
     static uint8_t s_button_read_failures = 0;
     static bool s_z_latched = false;
@@ -249,6 +255,8 @@ static void update_effects_from_joystick2() {
     static uint8_t s_y_zero_confirm = 0;
 #if defined(PARTY_PICO_MODE_SYNTH)
     static bool s_z_was_latched = false;
+#elif defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON)
+    static bool s_blue_was_pressed = false;
 #endif
 
     int16_t x_raw = 0;
@@ -364,6 +372,36 @@ static void update_effects_from_joystick2() {
         printf("joy x=%d y=%d z=%u semi=%d (base=%d acc=%+d)\n",
                (int)x_raw, (int)y_raw, s_z_latched ? 1u : 0u, semitone, base_semi, accidental);
     }
+#elif defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON)
+    // Dual Button: active-low, no software debounce. Red/Z are read-only (not printed).
+    const bool red_pressed = (gpio_get(kDualButtonRedGpio) == 0);
+    const bool blue_pressed = (gpio_get(kDualButtonBlueGpio) == 0);
+    (void)red_pressed;
+
+    const int base_semi = map_joystick2_y_to_base_semitone(y_used);
+    const int accidental = map_joystick2_x_to_accidental(x_used);
+    const int semitone = base_semi + accidental;
+    // Gate on Blue alone; Joystick2 presence is not required.
+    const bool gated = blue_pressed;
+
+    if (gated) {
+        g_synth.setSemitone(semitone);
+    }
+    if (!s_blue_was_pressed && gated) {
+        g_synth.setSemitone(semitone);
+        g_synth.noteOn();
+    } else if (s_blue_was_pressed && !gated) {
+        g_synth.noteOff();
+    }
+    s_blue_was_pressed = gated;
+
+    static uint32_t s_last_print_ms = 0;
+    const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (now_ms - s_last_print_ms >= kJoystick2PrintMs) {
+        s_last_print_ms = now_ms;
+        printf("joy x=%d y=%d blue=%u semi=%d (base=%d acc=%+d)\n",
+               (int)x_raw, (int)y_raw, gated ? 1u : 0u, semitone, base_semi, accidental);
+    }
 #endif
 }
 
@@ -374,10 +412,10 @@ extern "C" void hal_led_toggle(void) {
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_state);
 }
 
-// Pico SDK multicore: joystick I2C polling runs on core 1.
+// Pico SDK multicore: audio parameter polling runs on core 1.
 static void core1_entry(void) {
     while (true) {
-        update_effects_from_joystick2();
+        update_audio_parameters();
         sleep_ms(kJoystick2PollMs);
     }
 }
@@ -388,7 +426,9 @@ int main() {
     // delay for developers to check startup messages.
     sleep_ms(3000);
 
-#if defined(PARTY_PICO_MODE_SYNTH)
+#if defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON)
+    printf("main started (PARTY_PICO_MODE_SYNTH_WITH_BUTTON)\n");
+#elif defined(PARTY_PICO_MODE_SYNTH)
     printf("main started (PARTY_PICO_MODE_SYNTH)\n");
 #elif defined(PARTY_PICO_MODE_DJ)
     printf("main started (PARTY_PICO_MODE_DJ)\n");
@@ -401,12 +441,24 @@ int main() {
     init_effects();
     g_joystick2.init();
 
+#if defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON)
+    // INPUT only; Dual Button onboard 10k pull-ups require VCC=3V3 (no Pico internal pull-up).
+    gpio_init(kDualButtonRedGpio);
+    gpio_set_dir(kDualButtonRedGpio, GPIO_IN);
+    gpio_init(kDualButtonBlueGpio);
+    gpio_set_dir(kDualButtonBlueGpio, GPIO_IN);
+#endif
+
 #if USING_I2C
     btstack_audio_sink_set_instance(btstack_audio_pico_sink_get_instance());
 #endif
 
     btstack_main(0, nullptr);
 
+#if defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON)
+    // Always poll Dual Button Blue even if Joystick2 is missing.
+    multicore_launch_core1(core1_entry);
+#else
     if (g_joystick2.ok()) {
         multicore_launch_core1(core1_entry);
     } else {
@@ -415,6 +467,7 @@ int main() {
 #elif defined(PARTY_PICO_MODE_SYNTH)
 #endif
     }
+#endif
 
     btstack_run_loop_execute();
 
