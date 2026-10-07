@@ -77,6 +77,7 @@ Triggers that should cause the agent to consult Going-Zero on GitHub:
 ## Build / Flash
 
 - Use PlatformIO (`pio`) for building, uploading, and monitoring. See `.agents/skills/pio-workflow/SKILL.md`.
+- For Pico / Pico 2 W apps under `pico_src/` (CMake + Ninja + `picotool`, including 1200-baud USB BOOTSEL reset), see `.agents/skills/pico-workflow/SKILL.md`.
 - After C/C++ edits, confirm with a **host syntax-only** compile (`clang++ -std=c++17 -fsyntax-only`), not `pio run`. Full firmware build only when the user asks to build/flash, when Arduino/ESP-IDF APIs or `platformio.ini` change, or before a PR/flash. Do not run `pio check` unless asked.
 
 ## Cursor Cloud Agent (environment setup)
