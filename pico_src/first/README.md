@@ -98,28 +98,29 @@ cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w                         # defau
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH_WITH_BUTTON
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=DJ
+cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SAMPLER
 ```
 
-#### Dual Button wiring (`SYNTH_WITH_BUTTON`)
+#### Dual Button wiring (`SYNTH_WITH_BUTTON`, `SAMPLER`)
 
 | Dual Button (Grove) | Pico 2W |
 | --- | --- |
 | Red (VCC) | **3V3** (not 5V) |
 | Black (GND) | GND |
-| Yellow (Red btn) | **GP6** (read-only) |
-| White (Blue btn) | **GP7** (gate) |
+| Yellow (Red btn) | **GP6** (read-only in `SYNTH_WITH_BUTTON`; record while held in `SAMPLER`) |
+| White (Blue btn) | **GP7** (gate / sampler noteOn-Off) |
 
 Active-low; unit onboard 10 kΩ pull-ups to VCC. Firmware uses `GPIO_IN` only (no Pico internal pull-up).
 
 #### Control matrix
 
-| Input | `SYNTH_WITH_BUTTON` | `SYNTH` | `DJ` |
-| --- | --- | --- | --- |
-| Joystick2 Y | pitch 9 zones | pitch 9 zones | Freezer grain |
-| Joystick2 X | ♭ / ♮ / ♯ | ♭ / ♮ / ♯ | DJ Filter |
-| Joystick2 Z | read-only | gate | Freezer gate |
-| Dual Button Blue (GP7) | gate | — | — |
-| Dual Button Red (GP6) | read-only | — | — |
+| Input | `SYNTH_WITH_BUTTON` | `SYNTH` | `DJ` | `SAMPLER` |
+| --- | --- | --- | --- | --- |
+| Joystick2 Y | pitch 9 zones | pitch 9 zones | Freezer grain | printf only |
+| Joystick2 X | ♭ / ♮ / ♯ | ♭ / ♮ / ♯ | DJ Filter | printf only |
+| Joystick2 Z | read-only | gate | Freezer gate | printf only |
+| Dual Button Blue (GP7) | gate | — | — | noteOn / noteOff |
+| Dual Button Red (GP6) | read-only | — | — | record while held |
 
 The A2DP application body is still taken from the Pico SDK BTstack tree
 (`$PICO_SDK_PATH/lib/btstack/example/a2dp_sink_demo.c`), not from pico-examples.
