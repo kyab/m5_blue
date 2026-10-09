@@ -45,6 +45,7 @@ ESP32-A2DP-1.8.2/docs
 
 # Local Python venv for scripts/ (see scripts/requirements-plots.txt)
 .venv/
+__pycache__/
 
 # Clangd index files
 .cache
