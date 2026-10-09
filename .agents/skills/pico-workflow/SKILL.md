@@ -5,8 +5,10 @@ description: >-
   CMake+Ninja and picotool. Prefers USB 1200-baud BOOTSEL reset
   (PICO_ENABLE_USB_RESET_VIA_BAUD_RATE) so flashing needs no BOOTSEL button.
   Use when the user works in pico_src (e.g. pico_src/first), or says things
-  like "書き込んで", "焼いて", "flash", "upload", "ビルドして", "build" for a
-  Pico CMake project — not PlatformIO / M5Stack (use pio-workflow for those).
+  like "書き込んで", "焼いて", "flash", "upload", "ビルドして", "build",
+  "ビルドして再接続して", "再接続して" for a Pico CMake project — not
+  PlatformIO / M5Stack (use pio-workflow for those). "再接続" uses blueutil,
+  which works on macOS only.
 ---
 
 # Pico Workflow
@@ -96,6 +98,7 @@ USB flash needs host device access: Shell `required_permissions: ["all"]`.
 | "ビルドして" / "build" | Configure (if needed) + `cmake --build build --target <name>` |
 | "書き込んで" / "焼いて" / "flash" / "upload" | Ensure UF2 exists (build if missing/stale) + `picotool load -f build/<name>.uf2` |
 | "ビルドして書き込んで" | Build then flash |
+| "ビルドして再接続して" / "再接続して" | Build, flash, then macOS-only `blueutil` reconnect (see Bluetooth reconnect). Skip reconnect if build or flash fails. |
 | "クリーンして" / "clean" | `cmake --build build --target clean` (or remove `build/` only if user asks for full clean) |
 
 ## Build
@@ -149,11 +152,51 @@ stty -f /dev/cu.usbmodemXXXX 1200   # real device name
 picotool load build/<name>.uf2
 ```
 
+## Bluetooth reconnect (macOS only)
+
+`blueutil` is a **macOS-only** Classic Bluetooth CLI (IOBluetooth). It does not exist on Linux or Windows. Do not substitute `bluetoothctl`, Windows Bluetooth APIs, or CoreBluetooth — CoreBluetooth is BLE only, and A2DP is BR/EDR.
+
+「ビルドして再接続して」 means build, flash, then reconnect. Reconnect **only after flash succeeds** (UF2 reached 100% and the board returns to application mode). If build or flash fails, stop and report that error. Do not run `blueutil`.
+
+1. Host check: run reconnect only when `uname -s` is `Darwin`. On any other OS, report build/flash status and say reconnect was skipped because `blueutil` works only on macOS.
+2. On macOS, `blueutil` must already be on `PATH` (Homebrew often installs `/opt/homebrew/bin/blueutil`). If `which blueutil` fails, do not install it unless the user asks. Report that this Mac needs `blueutil`.
+3. Shell `required_permissions: ["all"]`. Bluetooth calls fail or come back empty in the sandbox.
+4. Do **not** open the Pico CDC port (`/dev/cu.usbmodem*`) as part of reconnect. Opening it at 1200 baud reboots into BOOTSEL; a normal open can reset the board and drop the stack just flashed.
+5. After CDC is back, wait about 5 seconds so CYW43 / BTstack can become connectable, then connect.
+
+Resolve the device (first match):
+
+1. Address or name the user gave.
+2. Else the paired device whose name starts with `A2DP Sink Demo` (`blueutil --paired`).
+3. Several matches → ask which one. None paired → say so and stop. Do not inquiry-scan unless the user asks to pair.
+
+```bash
+blueutil --paired
+blueutil --connect <address>          # xx-xx-xx-xx-xx-xx
+blueutil --is-connected <address>      # expect 1
+blueutil --info <address>
+```
+
+A paired name also works: `blueutil --connect "A2DP Sink Demo …"`.
+
+If the first `--connect` fails, wait about 5 seconds and retry **once**. If it still fails, report the `blueutil` error and stop.
+
+Confirm A2DP, not only that a command exited 0:
+
+- `--is-connected` prints `1`, and `--info` says `connected`.
+- `blueutil --connected` can print nothing even when the link is up. Do not treat that empty list as failure.
+- `system_profiler SPBluetoothDataType` should list the device under Connected with `A2DP` in Services.
+- `system_profiler SPAudioDataType` should show the same name with `Transport: Bluetooth`.
+
+macOS may switch the default output to that device. Report it. Do not switch the default output back unless the user asks.
+
+On success, report the UF2 path, flash OK, CDC back, device name and address, `--is-connected` = 1, and whether A2DP shows up as a Bluetooth output.
+
 ## Execution Rules
 
 1. `working_directory` = resolved Pico app root.
 2. Flash / device probes: `required_permissions: ["all"]`.
-3. After success: report UF2 path, flash OK, and whether CDC reappeared. Keep it short.
+3. After success: report UF2 path, flash OK, and whether CDC reappeared. If this was a reconnect, also report the `blueutil` result (macOS only). Keep it short.
 4. After build failure: first compiler error with `file:line`, not a full log dump.
 5. Do not hardcode machine-specific absolute project paths in commands; `$HOME/.pico-sdk/...` toolchain paths from this skill are OK.
 6. Always build against Pico SDK **2.3.1** (`PICO_SDK_PATH=$HOME/.pico-sdk/sdk/2.3.1`).
@@ -180,6 +223,21 @@ cmake --build build --target a2dp_sink_demo
 picotool load -f build/a2dp_sink_demo.uf2
 ```
 
+**"ビルドして再接続して"** (macOS only; flash must succeed first)
+
+```bash
+. ./exports.sh
+export PICO_SDK_PATH="$HOME/.pico-sdk/sdk/2.3.1"
+export PATH="$HOME/.pico-sdk/picotool/2.3.0/picotool:$PATH"
+cmake --build build --target a2dp_sink_demo
+picotool load -f build/a2dp_sink_demo.uf2
+# Darwin only. Skip this whole reconnect on Linux/Windows — blueutil is macOS-only.
+sleep 5
+# Address from `blueutil --paired` (name starts with "A2DP Sink Demo").
+blueutil --connect <address>
+blueutil --is-connected <address>
+```
+
 ## Anti-Patterns
 
 - Do not use `pio run` / `pio-workflow` for these Pico CMake apps.
@@ -188,3 +246,6 @@ picotool load -f build/a2dp_sink_demo.uf2
 - Do not `picotool info && picotool load -f …`.
 - Do not flash vendored example trees by default.
 - Do not invent serial port names; list `/dev/cu.usbmodem*` when needed.
+- Do not run `blueutil` except on macOS (`uname -s` = `Darwin`). On Linux or Windows, stop after flash and say reconnect was skipped.
+- Do not reconnect when build or flash failed.
+- Do not open `/dev/cu.usbmodem*` to check the board during a `blueutil` reconnect.
