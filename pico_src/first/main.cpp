@@ -147,7 +147,7 @@ static const int kSynthZoneSemitones[kSynthPitchZones] = {0, 2, 4, 5, 7, 9, 11, 
 // X: + : sharp, - : flat, 0(20% deadzone) : natural.
 static const int16_t kSynthXDeadzone = static_cast<int16_t>(0.2f * static_cast<float>(kJoystick2AxisOffsetFullScale));
 
-static int map_joystick2_y_to_base_semitone(int16_t y_offset) {
+static int map_joystick2_y_to_pitch_zone(int16_t y_offset) {
     int32_t y = y_offset;
     if (y < -kJoystick2AxisOffsetFullScale) {
         y = -kJoystick2AxisOffsetFullScale;
@@ -160,8 +160,21 @@ static int map_joystick2_y_to_base_semitone(int16_t y_offset) {
     if (pos > span) pos = span;
     int zone = static_cast<int>(pos / (static_cast<float>(span) / kSynthPitchZones));
     if (zone >= kSynthPitchZones) zone = kSynthPitchZones - 1;
-    return kSynthZoneSemitones[zone];
+    return zone;
 }
+
+static int map_joystick2_y_to_base_semitone(int16_t y_offset) {
+    return kSynthZoneSemitones[map_joystick2_y_to_pitch_zone(y_offset)];
+}
+
+#if defined(PARTY_PICO_MODE_SAMPLER)
+// Zone semitones {0,2,4,5,7,9,11,12,14} shifted so the center zone (7) is unison.
+static const int kSamplerRelativeSemitones[kSynthPitchZones] = {-7, -5, -3, -2, 0, 2, 4, 5, 7};
+
+static int map_joystick2_y_to_relative_semitone(int16_t y_offset) {
+    return kSamplerRelativeSemitones[map_joystick2_y_to_pitch_zone(y_offset)];
+}
+#endif
 
 static int map_joystick2_x_to_accidental(int16_t x_offset) {
     if (x_offset < -kSynthXDeadzone) return -1;
@@ -440,6 +453,11 @@ static void update_audio_parameters() {
     const bool red_release = !red_pressed && s_red_was_pressed;
     const bool blue_release = !blue_pressed && s_blue_was_pressed;
 
+    const int relative = map_joystick2_y_to_relative_semitone(y_used);
+    const int accidental = map_joystick2_x_to_accidental(x_used);
+    const int semitone = relative + accidental;
+    g_sampler.setRelativeSemitone(semitone);
+
     if (red_edge) g_sampler.startRecord();
     if (blue_edge) g_sampler.noteOn();
     if (red_release) g_sampler.stopRecord();
@@ -448,18 +466,14 @@ static void update_audio_parameters() {
     s_red_was_pressed = red_pressed;
     s_blue_was_pressed = blue_pressed;
 
-    const int base_semi = map_joystick2_y_to_base_semitone(y_used);
-    const int accidental = map_joystick2_x_to_accidental(x_used);
-    const int semitone = base_semi + accidental;
-
     static uint32_t s_last_print_ms = 0;
     const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
     if (now_ms - s_last_print_ms >= kJoystick2PrintMs) {
         s_last_print_ms = now_ms;
-        printf("joy x=%d y=%d z=%u red(rec)=%u blue(play)=%u semi=%d (base=%d acc=%+d)\n",
+        printf("joy x=%d y=%d z=%u red(rec)=%u blue(play)=%u semi=%d (rel=%d acc=%+d)\n",
                (int)x_raw, (int)y_raw, s_z_latched ? 1u : 0u,
                red_pressed ? 1u : 0u, blue_pressed ? 1u : 0u,
-               semitone, base_semi, accidental);
+               semitone, relative, accidental);
     }
 #endif
 }
