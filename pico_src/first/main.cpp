@@ -209,7 +209,9 @@ static float g_synth_buf[kSynthFrames * 2];
 static const char* const kSoftpotNoteNames[] = {
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
 
-enum class SoftpotOwner : uint8_t { None, Red, Blue };
+enum class SoftpotOwner : uint8_t { None,
+                                    Red,
+                                    Blue };
 
 static void init_effects() {
 }
@@ -328,7 +330,6 @@ static void update_audio_parameters() {
     const bool red_rise = red_pressed && !s_red_was_pressed;
     const bool blue_rise = blue_pressed && !s_blue_was_pressed;
 
-    // Release first, then rising edges, so a real edge on this poll can start the next note.
     if (s_owner == SoftpotOwner::Red && !red_pressed) {
         g_synth.noteOff();
         s_owner = SoftpotOwner::None;
@@ -364,13 +365,13 @@ static void update_audio_parameters() {
         } else if (s_owner == SoftpotOwner::Blue) {
             owner = "blue";
         }
-        const char* held = "-";
+        const char* note = "-";
         if (s_owner != SoftpotOwner::None) {
-            held = kSoftpotNoteNames[s_held_semitone];
+            note = kSoftpotNoteNames[s_held_semitone];
         }
-        printf("softpot red=%u blue=%u adc=%u zone=%s owner=%s held=%s\n",
+        printf("softpot red=%u blue=%u adc=%u zone=%s owner=%s note=%s\n",
                red_pressed ? 1u : 0u, blue_pressed ? 1u : 0u, static_cast<unsigned>(adc),
-               kSoftpotNoteNames[zone], owner, held);
+               kSoftpotNoteNames[zone], owner, note);
     }
 #else
     static uint8_t s_button = 1; // 1 = released
