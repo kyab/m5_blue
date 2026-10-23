@@ -73,6 +73,7 @@ target_link_libraries(a2dp_sink_demo PRIVATE
     pico_btstack_sbc_decoder
     pico_audio_i2s
     hardware_i2c
+    hardware_adc
 )
 
 target_include_directories(a2dp_sink_demo PRIVATE
@@ -91,8 +92,8 @@ target_compile_definitions(a2dp_sink_demo PRIVATE
     PICO_ENABLE_USB_RESET_VIA_BAUD_RATE=1
 )
 
-# Effect switch: Default SYNTH_WITH_BUTTON. Use -DPARTY_PICO_MODE=SYNTH, DJ, or SAMPLER.
-set(PARTY_PICO_MODE "SYNTH_WITH_BUTTON" CACHE STRING "PARTY_PICO_MODE: SYNTH_WITH_BUTTON (default), SYNTH, DJ, or SAMPLER")
+# Effect switch: Default SYNTH_WITH_BUTTON. Use -DPARTY_PICO_MODE=SYNTH, DJ, SAMPLER, or SYNTH_SOFTPOT.
+set(PARTY_PICO_MODE "SYNTH_WITH_BUTTON" CACHE STRING "PARTY_PICO_MODE: SYNTH_WITH_BUTTON (default), SYNTH, DJ, SAMPLER, or SYNTH_SOFTPOT")
 if (PARTY_PICO_MODE STREQUAL "DJ")
     target_compile_definitions(a2dp_sink_demo PRIVATE PARTY_PICO_MODE_DJ=1)
 elseif (PARTY_PICO_MODE STREQUAL "SYNTH")
@@ -101,8 +102,10 @@ elseif (PARTY_PICO_MODE STREQUAL "SYNTH_WITH_BUTTON")
     target_compile_definitions(a2dp_sink_demo PRIVATE PARTY_PICO_MODE_SYNTH_WITH_BUTTON=1)
 elseif (PARTY_PICO_MODE STREQUAL "SAMPLER")
     target_compile_definitions(a2dp_sink_demo PRIVATE PARTY_PICO_MODE_SAMPLER=1)
+elseif (PARTY_PICO_MODE STREQUAL "SYNTH_SOFTPOT")
+    target_compile_definitions(a2dp_sink_demo PRIVATE PARTY_PICO_MODE_SYNTH_SOFTPOT=1)
 else()
-    message(FATAL_ERROR "Unknown PARTY_PICO_MODE='${PARTY_PICO_MODE}' (expected SYNTH_WITH_BUTTON, SYNTH, DJ, or SAMPLER)")
+    message(FATAL_ERROR "Unknown PARTY_PICO_MODE='${PARTY_PICO_MODE}' (expected SYNTH_WITH_BUTTON, SYNTH, DJ, SAMPLER, or SYNTH_SOFTPOT)")
 endif()
 
 pico_add_extra_outputs(a2dp_sink_demo)

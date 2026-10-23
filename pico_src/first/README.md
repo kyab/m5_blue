@@ -19,7 +19,7 @@ The same file contents are also present at tag `sdk-2.3.0`.
 | `main.cpp` | `bluetooth/btstack_examples/main.c` | C++ entry; Joystick2 + effects/synth; `USING_I2C` audio-sink wiring kept |
 | `btstack_audio_pico.c` | `bluetooth/btstack_examples/btstack_audio_pico.c` | Volume + `apply_effects_before_i2s` hook |
 | `btstack_config.h` | `bluetooth/config/btstack_config_common.h` | Inlined here (upstream `a2dp_sink_demo/btstack_config.h` only `#include`s the common header) |
-| `Synth.hpp` | (local) | Joystick2 monophonic sine (`SYNTH` / `SYNTH_WITH_BUTTON`) |
+| `Synth.hpp` | (local) | Monophonic sine voice (`SYNTH` / `SYNTH_WITH_BUTTON` / `SYNTH_SOFTPOT`). SoftPot owner and pitch latch live in `main.cpp` |
 
 
 ## Prerequisites
@@ -92,6 +92,7 @@ After reset, a `RPI-RP2` (or RP2350) mass-storage volume appears; copy
 - **Default `SYNTH_WITH_BUTTON`**: same Synth mix path as `SYNTH`, but Dual Button **Blue (GP7)** gates noteOn/noteOff (no software debounce). Joystick2 Y/X still set pitch while Blue is held. Joystick2 Z and Dual Button Red (GP6) are read-only (not printed). Blue works even if Joystick2 is missing.
 - **`SYNTH`**: Joystick2 Y → pitch zones, X → flat/sharp (±1 semitone), Z → gate; mixes into A2DP at `apply_effects_before_i2s`.
 - **`DJ`**: existing DJ Filter (X) + Freezer (Y grain, Z gate).
+- **`SYNTH_SOFTPOT`**: SoftPot on GP26 (ADC0) maps one octave, C through B. Pitch is latched with `setSemitone` only on the rising edge that starts the note. The button that started the note is the owner: only that button's release calls `noteOff`. The other button is ignored for that note. If red and blue both rise on the same poll while idle, red wins. Joystick2 is not used and I2C is not initialized.
 
 ```sh
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w                         # default = SYNTH_WITH_BUTTON
@@ -99,9 +100,10 @@ cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH_WITH_BU
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=DJ
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SAMPLER
+cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH_SOFTPOT
 ```
 
-#### Dual Button wiring (`SYNTH_WITH_BUTTON`, `SAMPLER`)
+#### Dual Button wiring (`SYNTH_WITH_BUTTON`, `SAMPLER`, `SYNTH_SOFTPOT`)
 
 | Dual Button (Grove) | Pico 2W |
 | --- | --- |
@@ -110,17 +112,28 @@ cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SAMPLER
 | Yellow (Red btn) | **GP6** (read-only in `SYNTH_WITH_BUTTON`; record while held in `SAMPLER`) |
 | White (Blue btn) | **GP7** (gate / sampler noteOn-Off) |
 
-Active-low; unit onboard 10 kΩ pull-ups to VCC. Firmware uses `GPIO_IN` only (no Pico internal pull-up).
+Active-low; unit onboard 10 kΩ pull-ups to VCC. Firmware uses `GPIO_IN` only (no Pico internal pull-up). In `SYNTH_SOFTPOT`, either button can start a note, and only the owner button's release stops it.
+
+#### SoftPot wiring (`SYNTH_SOFTPOT`)
+
+| SoftPot | Pico 2W |
+| --- | --- |
+| pin 1 (arrow, connector-side bus, high note B) | **3V3** direct |
+| pin 3 (no arrow, far-end bus, low note C) | **GND** direct |
+| pin 2 (wiper) | **GP26** (ADC0), with 10 kΩ in parallel to GND |
+
+No series resistors. No Pico internal pull on GP26. Far end and no-touch both read as C. `adc_read` once per 2 ms poll; `zone = (adc * 12) / 4096` (0 = C … 11 = B).
 
 #### Control matrix
 
-| Input | `SYNTH_WITH_BUTTON` | `SYNTH` | `DJ` | `SAMPLER` |
-| --- | --- | --- | --- | --- |
-| Joystick2 Y | pitch 9 zones | pitch 9 zones | Freezer grain | printf only |
-| Joystick2 X | ♭ / ♮ / ♯ | ♭ / ♮ / ♯ | DJ Filter | printf only |
-| Joystick2 Z | read-only | gate | Freezer gate | printf only |
-| Dual Button Blue (GP7) | gate | — | — | noteOn / noteOff |
-| Dual Button Red (GP6) | read-only | — | — | record while held |
+| Input | `SYNTH_WITH_BUTTON` | `SYNTH` | `DJ` | `SAMPLER` | `SYNTH_SOFTPOT` |
+| --- | --- | --- | --- | --- | --- |
+| Joystick2 Y | pitch 9 zones | pitch 9 zones | Freezer grain | printf only | — |
+| Joystick2 X | ♭ / ♮ / ♯ | ♭ / ♮ / ♯ | DJ Filter | printf only | — |
+| Joystick2 Z | read-only | gate | Freezer gate | printf only | — |
+| Dual Button Blue (GP7) | gate | — | — | noteOn / noteOff | noteOn if it starts the note; noteOff only while it owns the note |
+| Dual Button Red (GP6) | read-only | — | — | record while held | same as Blue; red wins if both rise together |
+| SoftPot wiper (GP26) | — | — | — | — | pitch latched at note-on (C–B) |
 
 The A2DP application body is still taken from the Pico SDK BTstack tree
 (`$PICO_SDK_PATH/lib/btstack/example/a2dp_sink_demo.c`), not from pico-examples.
