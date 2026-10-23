@@ -19,7 +19,7 @@ The same file contents are also present at tag `sdk-2.3.0`.
 | `main.cpp` | `bluetooth/btstack_examples/main.c` | C++ entry; Joystick2 + effects/synth; `USING_I2C` audio-sink wiring kept |
 | `btstack_audio_pico.c` | `bluetooth/btstack_examples/btstack_audio_pico.c` | Volume + `apply_effects_before_i2s` hook |
 | `btstack_config.h` | `bluetooth/config/btstack_config_common.h` | Inlined here (upstream `a2dp_sink_demo/btstack_config.h` only `#include`s the common header) |
-| `Synth.hpp` | (local) | Joystick2 monophonic sine (`SYNTH` / `SYNTH_WITH_BUTTON`); same voice, SoftPot latch (`SYNTH_SOFTPOT`) |
+| `Synth.hpp` | (local) | Monophonic sine voice (`SYNTH` / `SYNTH_WITH_BUTTON` / `SYNTH_SOFTPOT`). SoftPot owner and pitch latch live in `main.cpp` |
 
 
 ## Prerequisites
@@ -125,7 +125,7 @@ The A2DP application body is still taken from the Pico SDK BTstack tree
 | Dual Button Red (GP6) | read-only | — | — | record while held | same as Blue; red wins if both rise together |
 | SoftPot wiper (GP26) | — | — | — | — | pitch latched at note-on (C–B) |
 
-#### Dual Button wiring (`SYNTH_WITH_BUTTON`, `SAMPLER`)
+#### Dual Button wiring (`SYNTH_WITH_BUTTON`, `SAMPLER`, `SYNTH_SOFTPOT`)
 
 | Dual Button (Grove) | Pico 2W |
 | --- | --- |
@@ -134,7 +134,7 @@ The A2DP application body is still taken from the Pico SDK BTstack tree
 | Yellow (Red btn) | **GP6** (read-only in `SYNTH_WITH_BUTTON`; record while held in `SAMPLER`) |
 | White (Blue btn) | **GP7** (trigger / sampler noteOn-Off) |
 
-Active-low; unit onboard 10 kΩ pull-ups to VCC. Firmware uses `GPIO_IN` only (no Pico internal pull-up). The same button wiring is used by `SYNTH_SOFTPOT`. In that mode either button can start a note, and only the owner button's release stops it.
+Active-low; unit onboard 10 kΩ pull-ups to VCC. Firmware uses `GPIO_IN` only (no Pico internal pull-up). In `SYNTH_SOFTPOT`, either button can start a note, and only the owner button's release stops it.
 
 #### SoftPot wiring (`SYNTH_SOFTPOT`)
 
