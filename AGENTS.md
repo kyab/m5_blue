@@ -23,7 +23,7 @@ For coding, don't repeat ADR mentioned things in comments.
 - Source code comments: English.
 - Documentation (README.md etc.): English.
 - Chat responses to the user: Japanese (per user preference).
-- Japanese docs / plans / chat: avoid the word「行程」for joystick throw or axis range. Prefer「フルスケール」「軸レンジ」「可動範囲」「片側フルスケール」など.
+- Japanese docs / plans / chat wording: follow `.cursor/rules/japanese-wording.mdc`.
 
 ### Source code comments
 コメントは、コードや名前から読み取れない設計上の理由・仕様・不変条件・制約・注意点があるときだけ、簡潔に書いてください。動作の言い換えや、変数名・関数名・型名・構造から明らかな内容は書かないでください（例: `y_per_zone` があるなら「zone あたりの Y 幅で割っている」は不要）。追加・変更時は、コメントとコードの内容が一致していることを確認してください。

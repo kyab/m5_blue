@@ -1,6 +1,13 @@
+---
+description: Japanese wording preferences for docs, plans, and chat in this repository
+alwaysApply: true
+---
+
 # Japanese wording
 
 When writing Japanese documentation, plans, or chat replies for this project:
 
 - Do **not** use「行程」to mean joystick throw, stick travel, or axis range.
 - Prefer「フルスケール」「軸レンジ」「可動範囲」「片側フルスケール」など instead.
+- Do **not** use「ポール」for GPIO or sensor reads; use the English word `polling`.
+- Do **not** use「先端」for a git commit tip; use the English word `head`.
