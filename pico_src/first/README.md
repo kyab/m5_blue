@@ -89,9 +89,16 @@ After reset, a `RPI-RP2` (or RP2350) mass-storage volume appears; copy
 
 ### Build mode (`PARTY_PICO_MODE`)
 
-- **Default `SYNTH_WITH_BUTTON`**: same Synth mix path as `SYNTH`, but Dual Button **Blue (GP7)** gates noteOn/noteOff (no software debounce). Joystick2 Y/X still set pitch while Blue is held. Joystick2 Z and Dual Button Red (GP6) are read-only (not printed). Blue works even if Joystick2 is missing.
-- **`SYNTH`**: Joystick2 Y → pitch zones, X → flat/sharp (±1 semitone), Z → gate; mixes into A2DP at `apply_effects_before_i2s`.
-- **`DJ`**: existing DJ Filter (X) + Freezer (Y grain, Z gate).
+- **`SYNTH_WITH_BUTTON` (default)**: Mixes Synth into A2DP.  
+  - Joystick2 Y → pitch zones, X → flat/sharp (±1 semitone);  
+  - Dual Button **Blue** triggers noteOn/noteOff.
+- **`SYNTH`**: Mixes Synth into A2DP.
+  - Jyostick2 Y → pitch zones, X → flat/sharp (±1 semitone), Z triggers noteOn/noteOff.
+- **`DJ`**: Effects on A2DP playback.
+  - Joystick2 X → DJ Filter, Y → Freezer grain, Z → Freezer gate.
+- **`SAMPLER`**: Record/play sampler mixed into A2DP.
+  - Dual Button **Red** held = record, **Blue** = noteOn/noteOff. 
+  - Joystick2 Y/X set relative pitch.
 
 ```sh
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w                         # default = SYNTH_WITH_BUTTON
@@ -101,6 +108,20 @@ cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=DJ
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SAMPLER
 ```
 
+The A2DP application body is still taken from the Pico SDK BTstack tree
+(`$PICO_SDK_PATH/lib/btstack/example/a2dp_sink_demo.c`), not from pico-examples.
+
+
+#### Control matrix
+
+| Input | `SYNTH_WITH_BUTTON` | `SYNTH` | `DJ` | `SAMPLER` |
+| --- | --- | --- | --- | --- |
+| Joystick2 Y | pitch 9 zones | pitch 9 zones | Freezer grain | relative pitch |
+| Joystick2 X | ♭ / ♮ / ♯ | ♭ / ♮ / ♯ | DJ Filter | ♭ / ♮ / ♯ |
+| Joystick2 Z | read-only | trigger | Freezer gate | read-only |
+| Dual Button Blue (GP7) | trigger | — | — | noteOn / noteOff |
+| Dual Button Red (GP6) | read-only | — | — | record while held |
+
 #### Dual Button wiring (`SYNTH_WITH_BUTTON`, `SAMPLER`)
 
 | Dual Button (Grove) | Pico 2W |
@@ -108,22 +129,11 @@ cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SAMPLER
 | Red (VCC) | **3V3** (not 5V) |
 | Black (GND) | GND |
 | Yellow (Red btn) | **GP6** (read-only in `SYNTH_WITH_BUTTON`; record while held in `SAMPLER`) |
-| White (Blue btn) | **GP7** (gate / sampler noteOn-Off) |
+| White (Blue btn) | **GP7** (trigger / sampler noteOn-Off) |
 
 Active-low; unit onboard 10 kΩ pull-ups to VCC. Firmware uses `GPIO_IN` only (no Pico internal pull-up).
 
-#### Control matrix
 
-| Input | `SYNTH_WITH_BUTTON` | `SYNTH` | `DJ` | `SAMPLER` |
-| --- | --- | --- | --- | --- |
-| Joystick2 Y | pitch 9 zones | pitch 9 zones | Freezer grain | printf only |
-| Joystick2 X | ♭ / ♮ / ♯ | ♭ / ♮ / ♯ | DJ Filter | printf only |
-| Joystick2 Z | read-only | gate | Freezer gate | printf only |
-| Dual Button Blue (GP7) | gate | — | — | noteOn / noteOff |
-| Dual Button Red (GP6) | read-only | — | — | record while held |
-
-The A2DP application body is still taken from the Pico SDK BTstack tree
-(`$PICO_SDK_PATH/lib/btstack/example/a2dp_sink_demo.c`), not from pico-examples.
 
 ## Data Structure
 
