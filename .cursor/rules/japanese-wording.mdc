@@ -1,9 +1,9 @@
 ---
-description: Japanese wording preferences for docs, plans, and chat in this repository
+description: Project vocabulary and Japanese wording for docs, plans, comments, and chat
 alwaysApply: true
 ---
 
-# Japanese wording
+# Japanese wording / vocabulary
 
 When writing Japanese documentation, plans, or chat replies for this project:
 
@@ -11,3 +11,9 @@ When writing Japanese documentation, plans, or chat replies for this project:
 - Prefer「フルスケール」「軸レンジ」「可動範囲」「片側フルスケール」など instead.
 - Do **not** use「ポール」for GPIO or sensor reads; use the English word `polling`.
 - Do **not** use「先端」for a git commit tip; use the English word `head`.
+
+When describing actions that start or stop sound (noteOn/noteOff, 発音, playback/pause, hold-to-sound), in English docs/comments and in Japanese chat or plans:
+
+- Prefer the English word **`trigger`** (e.g. “Blue triggers noteOn/noteOff”, 「Blue で trigger」).
+- Do **not** use **`gate`** /「ゲート」for that control sense.
+- Keep `gate` only where it is an established DSP/parameter name (e.g. Freezer’s gate input as a product term), not for generic “press to sound / play” wording.
