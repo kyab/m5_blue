@@ -99,7 +99,9 @@ After reset, a `RPI-RP2` (or RP2350) mass-storage volume appears; copy
 - **`SAMPLER`**: Record/play sampler mixed into A2DP.
   - Dual Button **Red** held = record, **Blue** = noteOn/noteOff. 
   - Joystick2 Y/X set relative pitch.
-- **`SYNTH_SOFTPOT`**: SoftPot on GP26 (ADC0) maps one octave, C through B. Pitch is latched with `setSemitone` only on the rising edge that starts the note. The button that started the note is the owner: only that button's release calls `noteOff`. The other button is ignored for that note. If red and blue both rise on the same poll while idle, red wins. Joystick2 is not used and I2C is not initialized.
+- **`SYNTH_SOFTPOT`**: SoftPot on GP26 (ADC0) maps one octave, C through B. Joystick2 is not used and I2C is not initialized. `SOFTPOT_TRIGGER_MODE` selects the gate (default `DIRECT`).
+  - **`DIRECT`**: `adc <= 40` is release (`noteOff`). A touch (`adc >= 41`) calls `noteOn` at that zone. A zone change while touched restarts the attack at the new pitch and keeps oscillator phase. Buttons are logged and ignored.
+  - **`BUTTON`**: Pitch is latched with `setSemitone` only on the rising edge that starts the note. The button that started the note is the owner: only that button's release calls `noteOff`. The other button is ignored for that note. If red and blue both rise on the same poll while idle, red wins. The release threshold is not used.
 
 ```sh
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w                         # default = SYNTH_WITH_BUTTON
@@ -108,7 +110,10 @@ cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=DJ
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SAMPLER
 cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH_SOFTPOT
+cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPARTY_PICO_MODE=SYNTH_SOFTPOT -DSOFTPOT_TRIGGER_MODE=BUTTON
 ```
+
+`SYNTH_SOFTPOT` without `SOFTPOT_TRIGGER_MODE` uses `DIRECT`. Any other value fails configure.
 
 The A2DP application body is still taken from the Pico SDK BTstack tree
 (`$PICO_SDK_PATH/lib/btstack/example/a2dp_sink_demo.c`), not from pico-examples.
@@ -121,9 +126,9 @@ The A2DP application body is still taken from the Pico SDK BTstack tree
 | Joystick2 Y | pitch 9 zones | pitch 9 zones | Freezer grain | relative pitch | — |
 | Joystick2 X | ♭ / ♮ / ♯ | ♭ / ♮ / ♯ | DJ Filter | ♭ / ♮ / ♯ | — |
 | Joystick2 Z | read-only | trigger | Freezer gate | read-only | — |
-| Dual Button Blue (GP7) | trigger | — | — | noteOn / noteOff | noteOn if it starts the note; noteOff only while it owns the note |
-| Dual Button Red (GP6) | read-only | — | — | record while held | same as Blue; red wins if both rise together |
-| SoftPot wiper (GP26) | — | — | — | — | pitch latched at note-on (C–B) |
+| Dual Button Blue (GP7) | trigger | — | — | noteOn / noteOff | `BUTTON`: noteOn if it starts the note; noteOff only while it owns the note. `DIRECT`: ignored |
+| Dual Button Red (GP6) | read-only | — | — | record while held | `BUTTON`: same as Blue; red wins if both rise together. `DIRECT`: ignored |
+| SoftPot wiper (GP26) | — | — | — | — | `BUTTON`: pitch latched at note-on (C–B). `DIRECT`: touch gate and zone retrigger |
 
 #### Dual Button wiring (`SYNTH_WITH_BUTTON`, `SAMPLER`, `SYNTH_SOFTPOT`)
 
@@ -134,7 +139,7 @@ The A2DP application body is still taken from the Pico SDK BTstack tree
 | Yellow (Red btn) | **GP6** (read-only in `SYNTH_WITH_BUTTON`; record while held in `SAMPLER`) |
 | White (Blue btn) | **GP7** (trigger / sampler noteOn-Off) |
 
-Active-low; unit onboard 10 kΩ pull-ups to VCC. Firmware uses `GPIO_IN` only (no Pico internal pull-up). In `SYNTH_SOFTPOT`, either button can start a note, and only the owner button's release stops it.
+Active-low; unit onboard 10 kΩ pull-ups to VCC. Firmware uses `GPIO_IN` only (no Pico internal pull-up). In `SYNTH_SOFTPOT` `BUTTON` mode, either button can start a note, and only the owner button's release stops it. In `DIRECT` mode the buttons are still read for the log and do not gate the voice.
 
 #### SoftPot wiring (`SYNTH_SOFTPOT`)
 
@@ -144,7 +149,7 @@ Active-low; unit onboard 10 kΩ pull-ups to VCC. Firmware uses `GPIO_IN` only (n
 | pin 3 (no arrow, far-end bus, low note C) | **GND** direct |
 | pin 2 (wiper) | **GP26** (ADC0), with 10 kΩ in parallel to GND |
 
-No series resistors. No Pico internal pull on GP26. Far end and no-touch both read as C. `adc_read` once per 2 ms poll; `zone = (adc * 12) / 4096` (0 = C … 11 = B).
+No series resistors. No Pico internal pull on GP26. `adc_read` once per 2 ms poll; `zone = (adc * 12) / 4096` (0 = C … 11 = B). Far end and no-touch both fall in zone C. `DIRECT` treats `adc <= 40` as release, so a sounding note starts at `adc >= 41` (still C through 341).
 
 ## Data Structure
 

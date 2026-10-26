@@ -108,6 +108,18 @@ else()
     message(FATAL_ERROR "Unknown PARTY_PICO_MODE='${PARTY_PICO_MODE}' (expected SYNTH_WITH_BUTTON, SYNTH, DJ, SAMPLER, or SYNTH_SOFTPOT)")
 endif()
 
+# SoftPot gate. Consulted only when PARTY_PICO_MODE=SYNTH_SOFTPOT.
+set(SOFTPOT_TRIGGER_MODE "DIRECT" CACHE STRING "SOFTPOT_TRIGGER_MODE: DIRECT (default) or BUTTON")
+if (PARTY_PICO_MODE STREQUAL "SYNTH_SOFTPOT")
+    if (SOFTPOT_TRIGGER_MODE STREQUAL "BUTTON")
+        target_compile_definitions(a2dp_sink_demo PRIVATE PARTY_SOFTPOT_TRIGGER_BUTTON=1)
+    elseif (SOFTPOT_TRIGGER_MODE STREQUAL "DIRECT")
+        target_compile_definitions(a2dp_sink_demo PRIVATE PARTY_SOFTPOT_TRIGGER_DIRECT=1)
+    else()
+        message(FATAL_ERROR "Unknown SOFTPOT_TRIGGER_MODE='${SOFTPOT_TRIGGER_MODE}' (expected DIRECT or BUTTON)")
+    endif()
+endif()
+
 pico_add_extra_outputs(a2dp_sink_demo)
 
 # Run the toolchain size tool after every link.

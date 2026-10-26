@@ -14,7 +14,7 @@
 class Synth {
   public:
     // Low C note frequency. Change to 130.81f (C3) or 261.63f (C4) or 523.25f (C5).. as needed.
-    static constexpr float kBaseFrequencyHz = 130.81f; // C3
+    static constexpr float kBaseFrequencyHz = 261.63f; // C4
 
     static constexpr float kSampleRateHz = 44100.0f;
     static constexpr float kLevel = 0.6f;
@@ -28,6 +28,7 @@ class Synth {
 
     Synth() {
         _wantedOn = false;
+        _retrigger = false;
         _semitone = kInitialSemitone;
         _state = State::Off;
         _phase = 0.0f;
@@ -40,6 +41,14 @@ class Synth {
     void noteOn() { _wantedOn = true; }
 
     void noteOff() { _wantedOn = false; }
+
+    // Restart the attack without resetting phase. Applied in gen() so fade
+    // state stays on the audio thread.
+    void retrigger(int semitone) {
+        _semitone = semitone;
+        _wantedOn = true;
+        _retrigger = true;
+    }
 
     // Generate and fill interleaved stereo float buffer (nominal peak ±kLevel).
     void gen(float* interleavedStereo, uint32_t frameCount) {
@@ -100,6 +109,14 @@ class Synth {
                                  Tail };
 
     void syncVoiceRequest() {
+        if (_retrigger.exchange(false)) {
+            _fadeGain = 0.0f;
+            if (_state == State::Off) {
+                _phase = 0.0f;
+            }
+            _state = State::Head;
+            return;
+        }
         if (_wantedOn) {
             if (_state == State::Off) {
                 _phase = 0.0f;
@@ -124,6 +141,7 @@ class Synth {
     }
 
     std::atomic<bool> _wantedOn;
+    std::atomic<bool> _retrigger;
     std::atomic<int> _semitone;
     State _state;
     float _phase;

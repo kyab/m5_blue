@@ -27,6 +27,12 @@
 #include "Synth.hpp"
 #if defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
 #include "hardware/adc.h"
+#if !defined(PARTY_SOFTPOT_TRIGGER_BUTTON) && !defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+#error "SYNTH_SOFTPOT requires PARTY_SOFTPOT_TRIGGER_BUTTON or PARTY_SOFTPOT_TRIGGER_DIRECT"
+#endif
+#if defined(PARTY_SOFTPOT_TRIGGER_BUTTON) && defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+#error "PARTY_SOFTPOT_TRIGGER_BUTTON and PARTY_SOFTPOT_TRIGGER_DIRECT are mutually exclusive"
+#endif
 #endif
 #elif defined(PARTY_PICO_MODE_SAMPLER)
 #include "Sampler.hpp"
@@ -317,8 +323,12 @@ extern "C" void apply_effects_before_i2s(float* data, uint32_t frame_count) {
 // Shared input poll (Joystick2 + Dual Button when enabled); mode-specific mapping at the end.
 static void update_audio_parameters() {
 #if defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
+#if defined(PARTY_SOFTPOT_TRIGGER_BUTTON)
     static bool s_red_was_pressed = false;
     static bool s_blue_was_pressed = false;
+#elif defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+    static bool s_touching = false;
+#endif
     static SoftpotOwner s_owner = SoftpotOwner::None;
     static int s_held_semitone = 0;
 
@@ -327,6 +337,8 @@ static void update_audio_parameters() {
 
     const bool red_pressed = (gpio_get(kDualButtonRedGpio) == 0);
     const bool blue_pressed = (gpio_get(kDualButtonBlueGpio) == 0);
+
+#if defined(PARTY_SOFTPOT_TRIGGER_BUTTON)
     const bool red_rise = red_pressed && !s_red_was_pressed;
     const bool blue_rise = blue_pressed && !s_blue_was_pressed;
 
@@ -354,6 +366,25 @@ static void update_audio_parameters() {
 
     s_red_was_pressed = red_pressed;
     s_blue_was_pressed = blue_pressed;
+#elif defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+    // Untouched wiper sits near 0. At or below this count is release; zone math is unchanged.
+    static constexpr uint16_t kSoftpotReleaseAdc = 40;
+    const bool released = adc <= kSoftpotReleaseAdc;
+    if (released) {
+        if (s_touching) {
+            g_synth.noteOff();
+            s_touching = false;
+        }
+    } else if (!s_touching) {
+        s_held_semitone = static_cast<int>(zone);
+        g_synth.setSemitone(s_held_semitone);
+        g_synth.noteOn();
+        s_touching = true;
+    } else if (s_held_semitone != static_cast<int>(zone)) {
+        s_held_semitone = static_cast<int>(zone);
+        g_synth.retrigger(s_held_semitone);
+    }
+#endif
 
     static uint32_t s_last_print_ms = 0;
     const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
@@ -365,10 +396,13 @@ static void update_audio_parameters() {
         } else if (s_owner == SoftpotOwner::Blue) {
             owner = "blue";
         }
-        const char* note = "-";
-        if (s_owner != SoftpotOwner::None) {
-            note = kSoftpotNoteNames[s_held_semitone];
-        }
+        const bool sounding =
+#if defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+            s_touching;
+#else
+            s_owner != SoftpotOwner::None;
+#endif
+        const char* note = sounding ? kSoftpotNoteNames[s_held_semitone] : "-";
         printf("softpot red=%u blue=%u adc=%u zone=%s owner=%s note=%s\n",
                red_pressed ? 1u : 0u, blue_pressed ? 1u : 0u, static_cast<unsigned>(adc),
                kSoftpotNoteNames[zone], owner, note);
@@ -595,7 +629,11 @@ int main() {
 #elif defined(PARTY_PICO_MODE_SYNTH)
     printf("main started (PARTY_PICO_MODE_SYNTH)\n");
 #elif defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
-    printf("main started (PARTY_PICO_MODE_SYNTH_SOFTPOT)\n");
+#if defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+    printf("main started (PARTY_PICO_MODE_SYNTH_SOFTPOT DIRECT)\n");
+#else
+    printf("main started (PARTY_PICO_MODE_SYNTH_SOFTPOT BUTTON)\n");
+#endif
 #elif defined(PARTY_PICO_MODE_DJ)
     printf("main started (PARTY_PICO_MODE_DJ)\n");
 #elif defined(PARTY_PICO_MODE_SAMPLER)
