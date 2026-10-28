@@ -14,10 +14,10 @@
 class Synth {
   public:
     // Low C note frequency. Change to 130.81f (C3) or 261.63f (C4) or 523.25f (C5).. as needed.
-    static constexpr float kBaseFrequencyHz = 130.81f; // C3
+    static constexpr float kBaseFrequencyHz = 261.63f; // C4
 
     static constexpr float kSampleRateHz = 44100.0f;
-    static constexpr float kLevel = 0.6f;
+    static constexpr float kLevel = 0.8f;
     static constexpr int kInitialSemitone = 7; // G note
     static constexpr uint32_t kFadeInSamples =
         static_cast<uint32_t>(0.05f * kSampleRateHz); // Attack time
