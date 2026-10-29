@@ -82,12 +82,13 @@ Triggers that should cause the agent to consult Going-Zero on GitHub:
 
 ## Cursor Cloud Agent (environment setup)
 
-This repo uses **git submodules** (`ESP32-A2DP`, `Module-Audio`). Cloud Agent VMs need them checked out before `pio run` can succeed (e.g. missing `audio_i2c.hpp` from Module-Audio).
+Cloud Agent VMs are configured for **Pico** firmware under `pico_src/` (not PlatformIO / M5Stack).
 
-- **Primary**: `.cursor/environment.json` runs `git submodule update --init --recursive` in the `install` step alongside PlatformIO setup. See [Cursor Cloud Agent setup](https://cursor.com/docs/cloud-agent/setup) for how `install` / Dockerfile-based environments work.
-- **Fallback**: If submodules are still missing (e.g. shallow clone or interrupted install), run `git submodule update --init --recursive` from the repository root before building.
+- **Primary**: `.cursor/environment.json` runs `.cursor/setup-pico.sh`, which installs Arm GCC, CMake/Ninja, Pico SDK **2.3.1**, and picotool **2.3.0**, and initializes `pico_src/first/pico-extras`. See [Cursor Cloud Agent setup](https://cursor.com/docs/cloud-agent/setup).
+- **SDK path**: `PICO_SDK_PATH=$HOME/.pico-sdk/sdk/2.3.1` (also written to `/etc/profile.d/pico-sdk.sh`). Prefer `pico_src/first/exports.sh` when building that app.
+- **Smoke check**: configure and build `pico_src/first` (`a2dp_sink_demo`) with `-DPICO_BOARD=pico2_w` and `-DPICO_EXTRAS_PATH=$PWD/pico-extras`. Cloud VMs cannot flash USB devices; a successful `.uf2` is enough.
 
-There is no separate product named "Cursor web env setup agent" in the docs; environment provisioning is described as **onboarding at [cursor.com/onboard](https://cursor.com/onboard)** (optional snapshot) **or** **repository-defined setup** via `.cursor/environment.json` (and optionally a Dockerfile). Prefer keeping submodule + toolchain steps in `environment.json` / `AGENTS.md` rather than ad-hoc chat instructions.
+There is no separate product named "Cursor web env setup agent" in the docs; environment provisioning is described as **onboarding at [cursor.com/onboard](https://cursor.com/onboard)** (optional snapshot) **or** **repository-defined setup** via `.cursor/environment.json` (and optionally a Dockerfile). Prefer keeping toolchain steps in `environment.json` / `AGENTS.md` rather than ad-hoc chat instructions.
 
 ## Default PlatformIO Source Target
 
@@ -97,13 +98,12 @@ There is no separate product named "Cursor web env setup agent" in the docs; env
 
 ## Cursor Cloud specific instructions
 
-- **First build is slow (~95 s)**: PlatformIO downloads the ESP32 toolchain and compiles the entire Arduino framework on the first `pio run`. Subsequent incremental builds are fast (~5–10 s for source-only changes).
-- **No upload/monitor in Cloud VMs**: `pio run -t upload` and `pio device monitor` require a physical M5Stack Core2 over USB. In Cloud Agent VMs the "hello world" validation is a successful `pio run` (compilation produces `firmware.bin`).
-- **Static analysis**: `pio check -e m5stack-core2 --skip-packages` runs cppcheck on project source. One pre-existing "high" in a third-party library (`M5GFX`) is expected and not actionable.
-- **Build commands** (see also `.agents/skills/pio-workflow/SKILL.md` and `README.md`):
-  - Default target: `pio run` (or `pio run -e m5stack-core2`)
-  - Noise-test target: `pio run -e m5stack-core2-noise-test`
-  - Clean: `pio run -e m5stack-core2 -t clean`
+- **First environment install is slow**: `setup-pico.sh` clones the Pico SDK (recursive) and builds picotool once into the snapshot. Later agent boots from a successful environment build skip `install`.
+- **No USB flash in Cloud VMs**: `picotool load` needs a physical Pico. Validate with a successful CMake build that produces `build/<target>.uf2`.
+- **Build commands** (see `.agents/skills/pico-workflow/SKILL.md`):
+  - `cd pico_src/first && . ./exports.sh`
+  - `cmake -S . -B build -GNinja -DPICO_BOARD=pico2_w -DPICO_EXTRAS_PATH="$PWD/pico-extras"`
+  - `cmake --build build --target a2dp_sink_demo`
 
 ## Known Hardware Notes
 
