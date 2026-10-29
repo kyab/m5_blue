@@ -13,19 +13,31 @@
 #include "pico/cyw43_arch.h"
 #include "btstack.h"
 
+#if !defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
 #include "joystick2.hpp"
+#endif
 #include "effects.h"
 
 #if defined(PARTY_PICO_MODE_DJ)
 #include "RingBuffer.hpp"
 #include "Freezer.hpp"
 #include "DJFilter.hpp"
-#elif defined(PARTY_PICO_MODE_SYNTH) || defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON)
+#elif defined(PARTY_PICO_MODE_SYNTH) || defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON) || \
+    defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
 #include "Synth.hpp"
+#if defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
+#include "hardware/adc.h"
+#if !defined(PARTY_SOFTPOT_TRIGGER_BUTTON) && !defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+#error "SYNTH_SOFTPOT requires PARTY_SOFTPOT_TRIGGER_BUTTON or PARTY_SOFTPOT_TRIGGER_DIRECT"
+#endif
+#if defined(PARTY_SOFTPOT_TRIGGER_BUTTON) && defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+#error "PARTY_SOFTPOT_TRIGGER_BUTTON and PARTY_SOFTPOT_TRIGGER_DIRECT are mutually exclusive"
+#endif
+#endif
 #elif defined(PARTY_PICO_MODE_SAMPLER)
 #include "Sampler.hpp"
 #else
-#error "Define PARTY_PICO_MODE_SYNTH_WITH_BUTTON (default), PARTY_PICO_MODE_SYNTH, PARTY_PICO_MODE_DJ, or PARTY_PICO_MODE_SAMPLER"
+#error "Define PARTY_PICO_MODE_SYNTH_WITH_BUTTON (default), PARTY_PICO_MODE_SYNTH, PARTY_PICO_MODE_SYNTH_SOFTPOT, PARTY_PICO_MODE_DJ, or PARTY_PICO_MODE_SAMPLER"
 #endif
 
 // Implemented in pico-sdk/lib/btstack/example/a2dp_sink_demo.c
@@ -39,6 +51,7 @@ extern "C" const btstack_audio_sink_t* btstack_audio_pico_sink_get_instance(void
 static constexpr uint32_t kJoystick2PollMs = 2;
 static constexpr uint32_t kJoystick2PrintMs = 200;
 
+#if !defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
 static Joystick2 g_joystick2;
 
 static const int16_t kJoystick2AxisOffsetFullScale = 4096;
@@ -47,6 +60,7 @@ static const int16_t kAxisGlitchAbsPrev = 500;
 static const uint8_t kAxisZeroConfirm = 4;
 static const uint8_t kZReleaseConfirm = 12; // ~24 ms at loop delay(2)
 static const uint8_t kButtonReadFailureRelease = 12;
+#endif
 
 #if defined(PARTY_PICO_MODE_DJ)
 static constexpr uint32_t kDjProcessFrames = 512; // matches SAMPLES_PER_BUFFER in btstack_audio_pico.c
@@ -185,6 +199,47 @@ static int map_joystick2_x_to_accidental(int16_t x_offset) {
 static void init_effects() {
 }
 
+#elif defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
+// M5Stack Unit Dual Button: Yellow=Red→GP6, White=Blue→GP7 (active-low, onboard 10k to 3V3).
+static constexpr uint kDualButtonRedGpio = 6;
+static constexpr uint kDualButtonBlueGpio = 7;
+// SoftPot wiper on GP26 (ADC0). External 10k to GND is the only pulldown.
+static constexpr uint kSoftpotAdcGpio = 26;
+static constexpr uint kSoftpotAdcInput = 0;
+
+static Synth g_synth;
+
+static constexpr uint32_t kSynthFrames = 1024;
+static float g_synth_buf[kSynthFrames * 2];
+
+static const char* const kSoftpotNoteNames[] = {
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+
+enum class SoftpotOwner : uint8_t { None,
+                                    Red,
+                                    Blue };
+
+// SoftPot wiper with R = Rp = 10 kΩ (k = 1): invert v = α/(α+1) + parallel pulldown.
+// v = adc/4095. α = 0 when v = 0.
+static uint32_t softpot_adc_to_zone(uint16_t adc) {
+    if (adc == 0) {
+        return 0;
+    }
+    const float v = static_cast<float>(adc) / 4095.0f;
+    const float disc = 1.0f - 2.0f * v + 5.0f * v * v;
+    const float alpha = (v - 1.0f + sqrtf(disc)) / (2.0f * v);
+    int zone = static_cast<int>(alpha * 12.0f);
+    if (zone < 0) {
+        zone = 0;
+    } else if (zone > 11) {
+        zone = 11;
+    }
+    return static_cast<uint32_t>(zone);
+}
+
+static void init_effects() {
+}
+
 #endif
 
 extern "C" void apply_effects_before_i2s(float* data, uint32_t frame_count) {
@@ -246,7 +301,8 @@ extern "C" void apply_effects_before_i2s(float* data, uint32_t frame_count) {
         }
         offset += n;
     }
-#elif defined(PARTY_PICO_MODE_SYNTH) || defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON)
+#elif defined(PARTY_PICO_MODE_SYNTH) || defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON) || \
+    defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
     // Always run gen() so Head fade-in and Tail fade-out advance with the audio callback.
     uint32_t offset = 0;
     while (offset < frame_count) {
@@ -284,6 +340,112 @@ extern "C" void apply_effects_before_i2s(float* data, uint32_t frame_count) {
 
 // Shared input poll (Joystick2 + Dual Button when enabled); mode-specific mapping at the end.
 static void update_audio_parameters() {
+#if defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
+#if defined(PARTY_SOFTPOT_TRIGGER_BUTTON)
+    static bool s_red_was_pressed = false;
+    static bool s_blue_was_pressed = false;
+#elif defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+    static bool s_touching = false;
+#endif
+    static SoftpotOwner s_owner = SoftpotOwner::None;
+    static int s_held_semitone = 0;
+
+    const uint16_t adc = adc_read();
+    const uint32_t zone = softpot_adc_to_zone(adc);
+
+    const bool red_pressed = (gpio_get(kDualButtonRedGpio) == 0);
+    const bool blue_pressed = (gpio_get(kDualButtonBlueGpio) == 0);
+
+#if defined(PARTY_SOFTPOT_TRIGGER_BUTTON)
+    const bool red_rise = red_pressed && !s_red_was_pressed;
+    const bool blue_rise = blue_pressed && !s_blue_was_pressed;
+
+    if (s_owner == SoftpotOwner::Red && !red_pressed) {
+        g_synth.noteOff();
+        s_owner = SoftpotOwner::None;
+    } else if (s_owner == SoftpotOwner::Blue && !blue_pressed) {
+        g_synth.noteOff();
+        s_owner = SoftpotOwner::None;
+    }
+
+    if (s_owner == SoftpotOwner::None) {
+        if (red_rise) {
+            s_held_semitone = static_cast<int>(zone);
+            g_synth.setSemitone(s_held_semitone);
+            g_synth.noteOn();
+            s_owner = SoftpotOwner::Red;
+        } else if (blue_rise) {
+            s_held_semitone = static_cast<int>(zone);
+            g_synth.setSemitone(s_held_semitone);
+            g_synth.noteOn();
+            s_owner = SoftpotOwner::Blue;
+        }
+    }
+
+    s_red_was_pressed = red_pressed;
+    s_blue_was_pressed = blue_pressed;
+#elif defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+    // Untouched wiper sits near 0. At or below this count is release (independent of zone).
+    static constexpr uint16_t kSoftpotReleaseAdc = 70;
+    const bool released = adc <= kSoftpotReleaseAdc;
+    if (released) {
+        if (s_touching) {
+            g_synth.noteOff();
+            s_touching = false;
+        }
+    } else if (!s_touching) {
+        // Octave from buttons at contact only. Red +12 wins over blue -12 if both held.
+        s_held_semitone = static_cast<int>(zone);
+        if (red_pressed) {
+            s_held_semitone += 12;
+        } else if (blue_pressed) {
+            s_held_semitone -= 12;
+        }
+        g_synth.setSemitone(s_held_semitone);
+        g_synth.noteOn();
+        s_touching = true;
+    }
+#endif
+
+    static uint32_t s_last_print_ms = 0;
+    const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (now_ms - s_last_print_ms >= kJoystick2PrintMs) {
+        s_last_print_ms = now_ms;
+        const char* owner = "none";
+        if (s_owner == SoftpotOwner::Red) {
+            owner = "red";
+        } else if (s_owner == SoftpotOwner::Blue) {
+            owner = "blue";
+        }
+        const bool sounding =
+#if defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+            s_touching;
+#else
+            s_owner != SoftpotOwner::None;
+#endif
+        char note_buf[8] = "-";
+        if (sounding) {
+            int octave = 0;
+            int pitch_class = s_held_semitone;
+            while (pitch_class < 0) {
+                pitch_class += 12;
+                --octave;
+            }
+            while (pitch_class >= 12) {
+                pitch_class -= 12;
+                ++octave;
+            }
+            if (octave == 0) {
+                snprintf(note_buf, sizeof(note_buf), "%s", kSoftpotNoteNames[pitch_class]);
+            } else {
+                snprintf(note_buf, sizeof(note_buf), "%s%+d", kSoftpotNoteNames[pitch_class], octave);
+            }
+        }
+        printf("softpot red=%u blue=%u adc=%u zone=%s owner=%s note=%s\n",
+               red_pressed ? 1u : 0u, blue_pressed ? 1u : 0u, static_cast<unsigned>(adc),
+               kSoftpotNoteNames[zone], owner, note_buf);
+    }
+#else
     static uint8_t s_button = 1; // 1 = released
     static uint8_t s_button_read_failures = 0;
     static bool s_z_latched = false;
@@ -476,6 +638,7 @@ static void update_audio_parameters() {
                semitone, relative, accidental);
     }
 #endif
+#endif
 }
 
 // Used by some BTstack examples to toggle the board LED.
@@ -503,6 +666,12 @@ int main() {
     printf("main started (PARTY_PICO_MODE_SYNTH_WITH_BUTTON)\n");
 #elif defined(PARTY_PICO_MODE_SYNTH)
     printf("main started (PARTY_PICO_MODE_SYNTH)\n");
+#elif defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
+#if defined(PARTY_SOFTPOT_TRIGGER_DIRECT)
+    printf("main started (PARTY_PICO_MODE_SYNTH_SOFTPOT DIRECT)\n");
+#else
+    printf("main started (PARTY_PICO_MODE_SYNTH_SOFTPOT BUTTON)\n");
+#endif
 #elif defined(PARTY_PICO_MODE_DJ)
     printf("main started (PARTY_PICO_MODE_DJ)\n");
 #elif defined(PARTY_PICO_MODE_SAMPLER)
@@ -514,14 +683,23 @@ int main() {
     }
 
     init_effects();
+#if !defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
     g_joystick2.init();
+#endif
 
-#if defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON) || defined(PARTY_PICO_MODE_SAMPLER)
+#if defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON) || defined(PARTY_PICO_MODE_SAMPLER) || \
+    defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
     // INPUT only; Dual Button onboard 10k pull-ups require VCC=3V3 (no Pico internal pull-up).
     gpio_init(kDualButtonRedGpio);
     gpio_set_dir(kDualButtonRedGpio, GPIO_IN);
     gpio_init(kDualButtonBlueGpio);
     gpio_set_dir(kDualButtonBlueGpio, GPIO_IN);
+#endif
+
+#if defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
+    adc_init();
+    adc_gpio_init(kSoftpotAdcGpio);
+    adc_select_input(kSoftpotAdcInput);
 #endif
 
 #if USING_I2C
@@ -530,7 +708,8 @@ int main() {
 
     btstack_main(0, nullptr);
 
-#if defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON) || defined(PARTY_PICO_MODE_SAMPLER)
+#if defined(PARTY_PICO_MODE_SYNTH_WITH_BUTTON) || defined(PARTY_PICO_MODE_SAMPLER) || \
+    defined(PARTY_PICO_MODE_SYNTH_SOFTPOT)
     // Always poll Dual Button even if Joystick2 is missing.
     multicore_launch_core1(core1_entry);
 #else
