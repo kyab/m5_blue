@@ -11,8 +11,12 @@ PROFILE_SNIPPET='export PICO_SDK_PATH="$HOME/.pico-sdk/sdk/2.3.1"'
 
 echo "[setup-pico] Installing apt packages..."
 sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+# libstdc++-14-dev: host picotool link needs -lstdc++ (build-essential alone is
+# not enough on some Cloud base images where /usr/bin/c++ is Clang).
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   build-essential \
+  g++ \
+  libstdc++-14-dev \
   cmake \
   ninja-build \
   git \
