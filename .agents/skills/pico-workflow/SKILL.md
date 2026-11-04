@@ -2,8 +2,10 @@
 name: pico-workflow
 description: >-
   Build and flash Raspberry Pi Pico / Pico 2 W firmware under pico_src with
-  CMake+Ninja and picotool. Prefers USB 1200-baud BOOTSEL reset
-  (PICO_ENABLE_USB_RESET_VIA_BAUD_RATE) so flashing needs no BOOTSEL button.
+  CMake+Ninja and picotool. Soft BOOTSEL without the button needs either
+  picotool's vendor reset interface (PICO_ENABLE_USB_RESET_VIA_VENDOR_INTERFACE)
+  for `picotool load -f`, or a separate CDC 1200-baud path
+  (PICO_ENABLE_USB_RESET_VIA_BAUD_RATE) via stty/serial — not the same thing.
   Use when the user works in pico_src (e.g. pico_src/first), or says things
   like "書き込んで", "焼いて", "flash", "upload", "ビルドして", "build",
   "ビルドして再接続して", "再接続して" for a Pico CMake project — not
@@ -96,7 +98,7 @@ USB flash needs host device access: Shell `required_permissions: ["all"]`.
 | User intent | Action |
 |---|---|
 | "ビルドして" / "build" | Configure (if needed) + `cmake --build build --target <name>` |
-| "書き込んで" / "焼いて" / "flash" / "upload" | Ensure UF2 exists (build if missing/stale) + `picotool load -f build/<name>.uf2` |
+| "書き込んで" / "焼いて" / "flash" / "upload" | Ensure UF2 exists (build if missing/stale), then flash. Vendor-reset apps: `picotool load -f build/<name>.uf2`. `pico_src/usb_dac_2`: `./rebuild_flash.sh` (one CDC open at 1200, then `picotool load -x`). |
 | "ビルドして書き込んで" | Build then flash |
 | "ビルドして再接続して" / "再接続して" | Build, flash, then macOS-only `blueutil` reconnect (see Bluetooth reconnect). Skip reconnect if build or flash fails. |
 | "クリーンして" / "clean" | `cmake --build build --target clean` (or remove `build/` only if user asks for full clean) |
@@ -124,9 +126,18 @@ Submodules: if configure fails on missing `pico-extras` / SDK pieces, run
 
 ## Flash (no BOOTSEL button)
 
-Preferred path when firmware was built with `PICO_ENABLE_USB_RESET_VIA_BAUD_RATE=1`
-(and USB stdio enabled): `picotool load -f` opens CDC at magic baud **1200**,
-reboots to BOOTSEL, loads UF2, reboots to app.
+Two **independent** soft-BOOTSEL paths exist in the SDK. Do not equate them:
+
+| Path | Firmware flag | Host trigger |
+|---|---|---|
+| picotool force | `PICO_ENABLE_USB_RESET_VIA_VENDOR_INTERFACE=1` (plus Reset vendor IF in USB descriptors) | `picotool load -f` / `picotool reboot -f` — talks to the Reset vendor interface. **Does not** set CDC baud to 1200. |
+| Magic baud | `PICO_ENABLE_USB_RESET_VIA_BAUD_RATE=1` | Open / set the CDC port to `PICO_USB_RESET_MAGIC_BAUD_RATE` (default **1200**), e.g. `stty` or a serial open. Used by some Arduino/PlatformIO uploaders; **not** by picotool. |
+
+With custom TinyUSB descriptors (Audio/MIDI/CDC), vendor reset also needs the Reset IF wired into those descriptors; baud reset only needs the CDC line-coding callback linked.
+
+### A — `picotool load -f` (vendor reset)
+
+Use when the running firmware exposes the picotool Reset vendor interface:
 
 ```bash
 . ./exports.sh
@@ -135,22 +146,24 @@ export PATH="$HOME/.pico-sdk/picotool/2.3.0/picotool:$PATH"
 picotool load -f build/<name>.uf2
 ```
 
-Rules:
+### B — 1200 baud then load (baud reset)
 
-1. **Do not** gate flash on `picotool info` — while the app is running, `info` fails and `&&` skips `load`.
-2. Already in BOOTSEL → `picotool load build/<name>.uf2` ( `-f` still OK).
-3. After load, `ERROR: … rebooting` is often benign if the progress bar reached 100%. Confirm CDC returns (`ls /dev/cu.usbmodem*`) after ~2s.
-4. Optional verify (disruptive; reboots via `-f`): `picotool info -f` should show program `name: <name>`. Prefer CDC reappearance for routine checks.
-5. No CDC and not in BOOTSEL → tell the user to hold BOOTSEL once, or use Option B below.
-
-### Fallback — 1200 baud then load
+Use when baud reset is enabled but picotool has no Reset IF (`-f` fails with no BOOTSEL / no compatible device). `pico_src/usb_dac_2` is this case (vendor IF off, VID `0xCafe`); `./rebuild_flash.sh` does the steps below.
 
 ```bash
 ls /dev/cu.usbmodem*
-stty -f /dev/cu.usbmodemXXXX 1200   # real device name
-# wait for RPI-RP2 / RP2350 volume or BOOTSEL device, then:
-picotool load build/<name>.uf2
+# Open the one CDC port at 1200 once, then close it. Do not leave it at 1200.
+# wait for RPI-RP2 / RP2350 volume or `picotool info`, then:
+picotool load -x build/<name>.uf2
 ```
+
+Rules:
+
+1. **Do not** gate flash on `picotool info` without `-f` — while the app is running, plain `info` fails and `&&` skips `load`.
+2. Already in BOOTSEL → `picotool load build/<name>.uf2` (no `-f` needed; `-f` still OK if a vendor IF is present).
+3. After load, `ERROR: … rebooting` is often benign if the progress bar reached 100%. Confirm CDC returns (`ls /dev/cu.usbmodem*`) after ~2s.
+4. Optional verify (disruptive; needs vendor IF for `-f`): `picotool info -f` should show program `name: <name>`. Prefer CDC reappearance for routine checks.
+5. Soft BOOTSEL fails (neither `-f` nor 1200 enters BOOTSEL) → stop and ask the user to hold BOOTSEL once; do not keep retrying 1200.
 
 ## Bluetooth reconnect (macOS only)
 
@@ -242,7 +255,8 @@ blueutil --is-connected <address>
 
 - Do not use `pio run` / `pio-workflow` for these Pico CMake apps.
 - Do not build with Pico SDK 2.3.0 (or any non-2.3.1) unless the user asks.
-- Do not require the physical BOOTSEL button when baud-reset firmware is already on the board.
+- Do not claim `picotool load -f` uses 1200 baud; `-f` is vendor-interface reset only.
+- Do not require the physical BOOTSEL button when a working soft-BOOTSEL path (vendor IF or baud 1200) is confirmed on the running firmware.
 - Do not `picotool info && picotool load -f …`.
 - Do not flash vendored example trees by default.
 - Do not invent serial port names; list `/dev/cu.usbmodem*` when needed.

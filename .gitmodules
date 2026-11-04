@@ -9,3 +9,6 @@
 [submodule "pico_src/first/pico-extras"]
 	path = pico_src/first/pico-extras
 	url = https://github.com/raspberrypi/pico-extras.git
+[submodule "pico_src/usb_dac_2/lib/tinyusb"]
+	path = pico_src/usb_dac_2/lib/tinyusb
+	url = https://github.com/hathach/tinyusb.git
