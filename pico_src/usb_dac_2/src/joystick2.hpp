@@ -18,11 +18,10 @@ class Joystick2 {
     static constexpr uint8_t kButtonReg = 0x20;
     static constexpr uint8_t kOffsetAdc12Reg = 0x50;
     static constexpr uint8_t kFirmwareVersionReg = 0xFE;
-    // M5UnitJoystick2::begin defaults to 400 kHz.
-    static constexpr uint kI2cHz = 400000;
+    static constexpr uint kI2cHz = 100000;
     // One attempt. A retry loop on core0 blocks the USB audio drain.
     static constexpr uint8_t kI2cRetries = 1;
-    // Whole-transfer budget. A 400 kHz button+axes read is a few hundred microseconds; this still caps a stuck bus.
+    // Whole-transfer budget. A 100 kHz button+axes read is about 1.1 ms; this still caps a stuck bus.
     static constexpr uint kI2cTimeoutUs = 1500;
 
     bool init() {
