@@ -13,7 +13,7 @@ Pico 2 W firmware that shows up on the host as a USB audio output (UAC1, 48 kHz 
 ## Behavior
 
 - **USB Audio**: the host stream goes Freezer → DJ Filter, then mixes with the Dual Button synth. Host volume and mute apply to the whole output (USB audio + synth). Range is -50 dB to 0 dB in 1 dB steps.
-- **Joystick2** (same mapping as `pico_src/first` DJ mode): X = DJ Filter, Y = Freezer grain (1000–5000 samples), Z = Freezer gate. Core0 polls about every 2 ms; DSP runs on core1. If Joystick2 is missing, the filter stays at bypass and Freezer stays off.
+- **Joystick2** (same mapping as `pico_src/first` DJ mode): X = DJ Filter, Y = Freezer grain (1000–5000 samples), Z = Freezer gate. Core1 polls it every 8 ms with a 1.5 ms I2C timeout. Core0 only runs USB and the Dual Button; a 100 kHz read on core0 was stalling the USB audio drain. If Joystick2 is missing, the filter stays at bypass and Freezer stays off.
 - **USB MIDI** (device to host only): both buttons send C4 (note 60) note on / off on channel 1, velocity 100.
 - **Synth**: the blue button triggers the `Synth` at C4 while it is held. It plays whether or not the host is streaming.
 - **CDC**: `printf` output once per second (FIFO level, overflow / underrun counters, core1 loop rate), plus occasional Joystick2 status lines. Opening the port at 1200 baud reboots into BOOTSEL.
@@ -21,9 +21,9 @@ Pico 2 W firmware that shows up on the host as a USB audio output (UAC1, 48 kHz 
 ## Layout
 
 ```
-src/main.cpp          core0 loop: tud_task, USB audio hand-off, MIDI RX drain, shared 2 ms Dual Button + Joystick2 poll, status print
+src/main.cpp          core0 loop: tud_task, USB audio hand-off, MIDI RX drain, 2 ms Dual Button poll, status print
 src/usb_audio.cpp     UAC1 callbacks, volume/mute, TinyUSB FIFO -> hand-off ring
-src/audio_engine.cpp  core1: I2S, Freezer + DJ Filter on USB, synth, mix, master gain; Joystick2 poll helper for core0
+src/audio_engine.cpp  core1: I2S, 8 ms Joystick2 poll, Freezer + DJ Filter on USB, synth, mix, master gain
 src/usb_midi.cpp      Dual Button poll + note on/off; MIDI RX drain
 src/spsc_ring.h       lock-free ring between core0 and core1
 src/Synth.hpp         copied from ../first with kSampleRateHz = 48000

@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <cstdio>
 
 #include "DJFilter.hpp"
 #include "Freezer.hpp"
@@ -27,9 +26,9 @@ constexpr float kMasterGainSmoothing = 0.002f;
 constexpr int16_t kJoystick2AxisOffsetFullScale = 4096;
 constexpr int16_t kJoystick2XChangeThreshold = 200;
 constexpr int16_t kAxisGlitchAbsPrev = 500;
-constexpr uint8_t kAxisZeroConfirm = 4;
-constexpr uint8_t kZReleaseConfirm = 12;  // ~24 ms at 2 ms polling
-constexpr uint8_t kButtonReadFailureRelease = 12;
+constexpr uint8_t kAxisZeroConfirm = 1;  // ~8 ms at 8 ms polling (was 4 counts at 2 ms)
+constexpr uint8_t kZReleaseConfirm = 3;   // ~24 ms at 8 ms polling (was 12 counts at 2 ms)
+constexpr uint8_t kButtonReadFailureRelease = 3;
 constexpr float kDjFilterBypassDeadzone = 0.03f;
 constexpr int16_t kJoystick2XDeadbandPos = 30;
 constexpr int16_t kJoystick2XDeadbandNeg = -30;
@@ -37,7 +36,7 @@ constexpr float kJoystick2FilterVHPFMin = 0.55f;
 constexpr float kJoystick2FilterVHPFMax = 0.99f;
 constexpr float kJoystick2FilterVLPFMin = -0.10f;
 constexpr float kJoystick2FilterVLPFMax = -0.86f;
-constexpr uint32_t kJoystick2PrintMs = 200;
+constexpr uint32_t kJoystick2PollMs = 8;
 
 static_assert(Synth::kSampleRateHz == static_cast<float>(kAudioSampleRateHz), "Synth must run at the I2S sample rate");
 
@@ -204,7 +203,15 @@ void core1_main() {
     float usb_lr[kAudioFramesPerBuffer * 2];
     StereoFrame usb[kAudioFramesPerBuffer];
 
+    uint32_t last_joystick_ms = to_ms_since_boot(get_absolute_time());
     for (;;) {
+        // I2C stays off core0. A 100 kHz read is ~1 ms and was starving usb_audio_task.
+        const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+        if (now_ms - last_joystick_ms >= kJoystick2PollMs) {
+            audio_engine_poll_joystick();
+            last_joystick_ms = to_ms_since_boot(get_absolute_time());
+        }
+
         audio_buffer_t* buffer = take_audio_buffer(pool, true);
         const uint32_t frames = buffer->max_sample_count;
 
@@ -253,7 +260,6 @@ void audio_engine_poll_joystick() {
     static uint8_t s_x_zero_confirm = 0;
     static int16_t s_y_held = 0;
     static uint8_t s_y_zero_confirm = 0;
-    static uint32_t s_last_print_ms = 0;
 
     int16_t x_raw = 0;
     int16_t y_raw = 0;
@@ -333,13 +339,6 @@ void audio_engine_poll_joystick() {
 
     g_freezer.setGrainSize(grainSamples);
     g_freezer.setActive(joystick_ok && s_z_latched);
-
-    const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-    if (now_ms - s_last_print_ms >= kJoystick2PrintMs) {
-        s_last_print_ms = now_ms;
-        printf("joy x=%d y=%d z=%u v=%+.2f g=%lu\n", (int)x_raw, (int)y_raw, s_z_latched ? 1u : 0u, (double)v,
-               (unsigned long)grainSamples);
-    }
 }
 
 void audio_engine_set_synth_gate(bool pressed) {

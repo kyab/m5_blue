@@ -14,7 +14,7 @@ struct AudioEngineStats {
 void audio_engine_init();
 // Launches the audio loop on core1.
 void audio_engine_start();
-// Safe to call from core0 (~2 ms Joystick2 polling).
+// Called from core1, paced at ~8 ms. Core0 must not touch I2C after init.
 void audio_engine_poll_joystick();
 // Safe to call from core0.
 void audio_engine_set_synth_gate(bool pressed);

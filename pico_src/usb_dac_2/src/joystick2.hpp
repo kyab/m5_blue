@@ -19,7 +19,10 @@ class Joystick2 {
     static constexpr uint8_t kOffsetAdc12Reg = 0x50;
     static constexpr uint8_t kFirmwareVersionReg = 0xFE;
     static constexpr uint kI2cHz = 100000;
-    static constexpr uint8_t kI2cRetries = 3;
+    // One attempt. A retry loop on core0 blocks the USB audio drain.
+    static constexpr uint8_t kI2cRetries = 1;
+    // Whole-transfer budget. Long enough for a 100 kHz button or axes read, short enough that a stuck bus returns.
+    static constexpr uint kI2cTimeoutUs = 1500;
 
     bool init() {
         i2c_init(kI2c, kI2cHz);
@@ -88,11 +91,11 @@ class Joystick2 {
     bool ok_ = false;
 
     bool readBytes(uint8_t reg, uint8_t* buffer, uint8_t length) {
-        int wrote = i2c_write_blocking(kI2c, kAddr, &reg, 1, true);
+        int wrote = i2c_write_timeout_us(kI2c, kAddr, &reg, 1, true, kI2cTimeoutUs);
         if (wrote != 1) {
             return false;
         }
-        int got = i2c_read_blocking(kI2c, kAddr, buffer, length, false);
+        int got = i2c_read_timeout_us(kI2c, kAddr, buffer, length, false, kI2cTimeoutUs);
         return got == (int)length;
     }
 };
