@@ -9,7 +9,8 @@
 namespace {
 
 constexpr uint32_t kStatusIntervalMs = 1000;
-constexpr uint32_t kJoystick2PollMs = 2;
+// Same wall-clock pacing as pico_src/first DJ / Dual Button loops.
+constexpr uint32_t kControlsPollMs = 2;
 
 void print_status() {
     static uint32_t last_loops = 0;
@@ -39,15 +40,17 @@ int main() {
     audio_engine_start();
 
     uint32_t last_status_ms = to_ms_since_boot(get_absolute_time());
-    uint32_t last_joystick_ms = last_status_ms;
+    uint32_t last_controls_ms = last_status_ms;
     for (;;) {
         tud_task();
         usb_audio_task();
         usb_midi_task();
 
         const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-        if (now_ms - last_joystick_ms >= kJoystick2PollMs) {
-            last_joystick_ms = now_ms;
+        if (now_ms - last_controls_ms >= kControlsPollMs) {
+            last_controls_ms = now_ms;
+            // One 2 ms gate: Dual Button + Joystick2 (matches pico_src/first).
+            usb_midi_poll_buttons();
             audio_engine_poll_joystick();
         }
         if (now_ms - last_status_ms >= kStatusIntervalMs) {

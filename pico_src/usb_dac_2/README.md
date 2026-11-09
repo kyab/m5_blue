@@ -21,10 +21,10 @@ Pico 2 W firmware that shows up on the host as a USB audio output (UAC1, 48 kHz 
 ## Layout
 
 ```
-src/main.cpp          core0 loop: tud_task, USB audio hand-off, MIDI, Joystick2 poll, status print
+src/main.cpp          core0 loop: tud_task, USB audio hand-off, MIDI RX drain, shared 2 ms Dual Button + Joystick2 poll, status print
 src/usb_audio.cpp     UAC1 callbacks, volume/mute, TinyUSB FIFO -> hand-off ring
-src/audio_engine.cpp  core1: I2S, Freezer + DJ Filter on USB, synth, mix, master gain
-src/usb_midi.cpp      button polling, note on/off
+src/audio_engine.cpp  core1: I2S, Freezer + DJ Filter on USB, synth, mix, master gain; Joystick2 poll helper for core0
+src/usb_midi.cpp      Dual Button poll + note on/off; MIDI RX drain
 src/spsc_ring.h       lock-free ring between core0 and core1
 src/Synth.hpp         copied from ../first with kSampleRateHz = 48000
 src/DJFilter.hpp      copied from ../first with _fs = 48000
