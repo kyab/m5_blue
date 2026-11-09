@@ -1,6 +1,6 @@
 # usb_dac_2
 
-Pico 2 W firmware that shows up on the host as a USB audio output (UAC1, 48 kHz / 16-bit stereo, headphones terminal), a USB MIDI output, and a CDC serial port. Audio is played through a Pimoroni Pico Audio Pack (I2S), mixed with a sine synth that runs independently of USB.
+Pico 2 W firmware that shows up on the host as a USB audio output (UAC1, 48 kHz / 16-bit stereo, headphones terminal), a USB MIDI output, and a CDC serial port. Audio is played through a Pimoroni Pico Audio Pack (I2S), mixed with a sine synth that runs independently of USB. Host USB audio can also be processed with the same DJ Filter and Freezer used by `pico_src/first` DJ mode.
 
 ## Hardware
 
@@ -8,23 +8,29 @@ Pico 2 W firmware that shows up on the host as a USB audio output (UAC1, 48 kHz 
 |---|---|
 | Pimoroni Pico Audio Pack (I2S) | DATA = GP9, BCK = GP10, LRCK = GP11 (MUTE / GP22 is left alone) |
 | M5Stack Dual Button unit | Red = GP6, Blue = GP7 (active low, external pull-up) |
+| M5Stack Unit Joystick2 | Red = 3V3, Black = GND, Yellow (SCL) = GP5, White (SDA) = GP4 (I2C0, addr `0x63`, 100 kHz, Pico internal pull-ups) |
 
 ## Behavior
 
-- **USB Audio**: the host volume and mute apply to the whole output (USB audio + synth). Range is -50 dB to 0 dB in 1 dB steps.
+- **USB Audio**: the host stream goes Freezer → DJ Filter, then mixes with the Dual Button synth. Host volume and mute apply to the whole output (USB audio + synth). Range is -50 dB to 0 dB in 1 dB steps.
+- **Joystick2** (same mapping as `pico_src/first` DJ mode): X = DJ Filter, Y = Freezer grain (1000–5000 samples), Z = Freezer gate. Core0 polls about every 2 ms; DSP runs on core1. If Joystick2 is missing, the filter stays at bypass and Freezer stays off.
 - **USB MIDI** (device to host only): both buttons send C4 (note 60) note on / off on channel 1, velocity 100.
 - **Synth**: the blue button triggers the `Synth` at C4 while it is held. It plays whether or not the host is streaming.
-- **CDC**: `printf` output once per second (FIFO level, overflow / underrun counters, core1 loop rate). Opening the port at 1200 baud reboots into BOOTSEL.
+- **CDC**: `printf` output once per second (FIFO level, overflow / underrun counters, core1 loop rate), plus occasional Joystick2 status lines. Opening the port at 1200 baud reboots into BOOTSEL.
 
 ## Layout
 
 ```
-src/main.cpp          core0 loop: tud_task, USB audio hand-off, MIDI, status print
+src/main.cpp          core0 loop: tud_task, USB audio hand-off, MIDI, Joystick2 poll, status print
 src/usb_audio.cpp     UAC1 callbacks, volume/mute, TinyUSB FIFO -> hand-off ring
-src/audio_engine.cpp  core1: I2S, synth, mix, master gain
+src/audio_engine.cpp  core1: I2S, Freezer + DJ Filter on USB, synth, mix, master gain
 src/usb_midi.cpp      button polling, note on/off
 src/spsc_ring.h       lock-free ring between core0 and core1
 src/Synth.hpp         copied from ../first with kSampleRateHz = 48000
+src/DJFilter.hpp      copied from ../first with _fs = 48000
+src/Freezer.hpp       copied from ../first (grain 1000–5000 samples)
+src/RingBuffer.hpp    copied from ../first
+src/joystick2.hpp     copied from ../first (I2C0 GP4/GP5)
 lib/tinyusb           TinyUSB 0.21.0 (git submodule)
 ```
 
@@ -102,3 +108,4 @@ The scan flags 5 ms silence more than 20 dB below the median, sample steps above
 4. Hold the blue button with the host idle: C4 (about 261.6 Hz) sounds, and keeps sounding across host play / stop.
 5. A MIDI monitor shows C4 note on / off from both buttons.
 6. `core1 loops/s` stays at about 1000.
+7. With Joystick2 connected, host playback responds to X (filter), Y (grain), and Z (Freezer gate); Dual Button blue still triggers C4 with or without USB audio.

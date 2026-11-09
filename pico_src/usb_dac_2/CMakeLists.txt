@@ -57,6 +57,7 @@ target_link_libraries(usb_dac_2
     pico_unique_id
     tinyusb_device
     pico_audio_i2s
+    hardware_i2c
 )
 
 pico_enable_stdio_uart(usb_dac_2 0)
