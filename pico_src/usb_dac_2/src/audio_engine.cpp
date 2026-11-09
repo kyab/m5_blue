@@ -205,7 +205,7 @@ void core1_main() {
 
     uint32_t last_joystick_ms = to_ms_since_boot(get_absolute_time());
     for (;;) {
-        // I2C stays off core0. A 100 kHz read is ~1 ms and was starving usb_audio_task.
+        // I2C stays off core0. A blocking read on that core was starving usb_audio_task.
         const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
         if (now_ms - last_joystick_ms >= kJoystick2PollMs) {
             audio_engine_poll_joystick();
