@@ -37,6 +37,8 @@ constexpr float kJoystick2FilterVHPFMax = 0.99f;
 constexpr float kJoystick2FilterVLPFMin = -0.10f;
 constexpr float kJoystick2FilterVLPFMax = -0.86f;
 constexpr uint32_t kJoystick2PollMs = 8;
+// Cold USB power-on: Joystick2 may miss the boot probe. Retry off the audio deadline.
+constexpr uint32_t kJoystick2RetryMs = 500;
 
 static_assert(Synth::kSampleRateHz == static_cast<float>(kAudioSampleRateHz), "Synth must run at the I2S sample rate");
 
@@ -208,7 +210,7 @@ void core1_main() {
         // I2C stays off core0. A blocking read on that core was starving usb_audio_task.
         const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
         if (now_ms - last_joystick_ms >= kJoystick2PollMs) {
-            audio_engine_poll_joystick();
+            audio_engine_poll_joystick(now_ms);
             last_joystick_ms = to_ms_since_boot(get_absolute_time());
         }
 
@@ -251,7 +253,15 @@ void audio_engine_start() {
     multicore_launch_core1_with_stack(core1_main, g_core1_stack, sizeof(g_core1_stack));
 }
 
-void audio_engine_poll_joystick() {
+void audio_engine_poll_joystick(uint32_t now_ms) {
+    if (!g_joystick2.ok()) {
+        static uint32_t last_retry_ms = 0;
+        if (now_ms - last_retry_ms >= kJoystick2RetryMs) {
+            last_retry_ms = now_ms;
+            g_joystick2.reinit_and_probe();
+        }
+    }
+
     static uint8_t s_button = 1;  // 1 = released
     static uint8_t s_button_read_failures = 0;
     static bool s_z_latched = false;
@@ -347,4 +357,10 @@ void audio_engine_set_synth_gate(bool pressed) {
 
 AudioEngineStats audio_engine_stats() {
     return AudioEngineStats{g_loops.load(std::memory_order_relaxed), g_usb_short_frames.load(std::memory_order_relaxed)};
+}
+
+JoystickProbeLog audio_engine_joystick_log() {
+    const JoystickProbeStatus st = g_joystick2.status();
+    return JoystickProbeLog{st.ok, st.fw, st.last_write, st.last_read, st.attempts, st.last_try_ms, st.ok_at_ms, st.boot_fails,
+                            st.boot_write, st.boot_read, st.sda, st.scl, st.baud};
 }
