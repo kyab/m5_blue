@@ -22,11 +22,9 @@ void print_status() {
            static_cast<unsigned long>(usb.underruns), static_cast<unsigned long>(engine.loops - last_loops),
            static_cast<unsigned long>(engine.usb_short_frames));
     const JoystickProbeLog joy = audio_engine_joystick_log();
-    // w/r: byte count, -1 NACK or no device, -2 timeout, -99 read not started. Repeated so a late CDC open still shows the boot probe.
-    printf("joy=%s fw=%u baud=%lu attempts=%lu ok_ms=%lu last_ms=%lu w=%d r=%d sda=%u scl=%u boot_fails=%lu boot_w=%d boot_r=%d\n",
-           joy.ok ? "ok" : "fail", joy.fw, static_cast<unsigned long>(joy.baud), static_cast<unsigned long>(joy.attempts),
-           static_cast<unsigned long>(joy.ok_at_ms), static_cast<unsigned long>(joy.last_try_ms), joy.last_write, joy.last_read, joy.sda,
-           joy.scl, static_cast<unsigned long>(joy.boot_fails), joy.boot_write, joy.boot_read);
+    // w/r: byte count, -1 NACK or no device, -2 timeout, -99 read not started. Repeated so a late CDC open still shows the probe.
+    printf("joy=%s fw=%u attempts=%lu ready_ms=%lu w=%d r=%d\n", joy.ok ? "ok" : "wait", joy.fw,
+           static_cast<unsigned long>(joy.attempts), static_cast<unsigned long>(joy.ok_at_ms), joy.last_write, joy.last_read);
     last_loops = engine.loops;
 }
 

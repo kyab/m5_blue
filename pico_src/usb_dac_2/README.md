@@ -13,10 +13,10 @@ Pico 2 W firmware that shows up on the host as a USB audio output (UAC1, 48 kHz 
 ## Behavior
 
 - **USB Audio**: the host stream goes Freezer → DJ Filter, then mixes with the Dual Button synth. Host volume and mute apply to the whole output (USB audio + synth). Range is -50 dB to 0 dB in 1 dB steps.
-- **Joystick2** (same mapping as `pico_src/first` DJ mode): X = DJ Filter, Y = Freezer grain (1000–5000 samples), Z = Freezer gate. Core1 polls it every 8 ms at 100 kHz with a 1.5 ms I2C timeout. Core0 only runs USB and the Dual Button; a blocking read on that core was stalling the USB audio drain. The boot probe runs five times, 50 ms apart. Joystick2 powers up with the Pico, so a cold USB insert can miss that window; core1 then retries every 500 ms. Until a probe succeeds, the filter stays at bypass and Freezer stays off.
+- **Joystick2** (same mapping as `pico_src/first` DJ mode): X = DJ Filter, Y = Freezer grain (1000–5000 samples), Z = Freezer gate. Core1 polls it every 8 ms at 100 kHz with a 1.5 ms I2C timeout. Core0 only runs USB and the Dual Button; a blocking read on that core was stalling the USB audio drain. Core0 sets up I2C and does not probe. On a cold USB insert the stick does not ACK during the first few hundred milliseconds (probes before that returned NACK). Core1 probes at 500 ms, then every 200 ms until it reads the firmware version. Until that succeeds, the filter stays at bypass and Freezer stays off.
 - **USB MIDI** (device to host only): both buttons send C4 (note 60) note on / off on channel 1, velocity 100.
 - **Synth**: the blue button triggers the `Synth` at C4 while it is held. It plays whether or not the host is streaming.
-- **CDC**: `printf` output once per second (FIFO level, overflow / underrun counters, core1 loop rate, and the latest Joystick2 probe). The probe line keeps repeating, so opening CDC after boot still shows whether the boot probe failed. `w`/`r` are byte counts, `-1` (NACK or no device), `-2` (timeout), or `-99` (read not started). Opening the port at 1200 baud reboots into BOOTSEL.
+- **CDC**: `printf` output once per second (FIFO level, overflow / underrun counters, core1 loop rate, and the latest Joystick2 probe). The probe line keeps repeating, so opening CDC after boot still shows `joy=ok` or `joy=wait`. `w`/`r` are byte counts, `-1` (NACK or no device), `-2` (timeout), or `-99` (read not started). Opening the port at 1200 baud reboots into BOOTSEL.
 
 ## Layout
 

@@ -37,8 +37,9 @@ constexpr float kJoystick2FilterVHPFMax = 0.99f;
 constexpr float kJoystick2FilterVLPFMin = -0.10f;
 constexpr float kJoystick2FilterVLPFMax = -0.86f;
 constexpr uint32_t kJoystick2PollMs = 8;
-// Cold USB power-on: Joystick2 may miss the boot probe. Retry off the audio deadline.
-constexpr uint32_t kJoystick2RetryMs = 500;
+// Cold USB insert: probes in the first ~250 ms got NACK (-1). The probe at 501 ms read fw=1.
+constexpr uint32_t kJoystick2ReadyMs = 500;
+constexpr uint32_t kJoystick2RetryMs = 200;
 
 static_assert(Synth::kSampleRateHz == static_cast<float>(kAudioSampleRateHz), "Synth must run at the I2S sample rate");
 
@@ -254,11 +255,11 @@ void audio_engine_start() {
 }
 
 void audio_engine_poll_joystick(uint32_t now_ms) {
-    if (!g_joystick2.ok()) {
-        static uint32_t last_retry_ms = 0;
-        if (now_ms - last_retry_ms >= kJoystick2RetryMs) {
-            last_retry_ms = now_ms;
-            g_joystick2.reinit_and_probe();
+    if (!g_joystick2.ok() && now_ms >= kJoystick2ReadyMs) {
+        static uint32_t last_probe_ms = 0;
+        if (last_probe_ms == 0 || now_ms - last_probe_ms >= kJoystick2RetryMs) {
+            last_probe_ms = now_ms;
+            g_joystick2.probe();
         }
     }
 
@@ -361,6 +362,5 @@ AudioEngineStats audio_engine_stats() {
 
 JoystickProbeLog audio_engine_joystick_log() {
     const JoystickProbeStatus st = g_joystick2.status();
-    return JoystickProbeLog{st.ok, st.fw, st.last_write, st.last_read, st.attempts, st.last_try_ms, st.ok_at_ms, st.boot_fails,
-                            st.boot_write, st.boot_read, st.sda, st.scl, st.baud};
+    return JoystickProbeLog{st.ok, st.fw, st.last_write, st.last_read, st.attempts, st.last_try_ms, st.ok_at_ms};
 }
