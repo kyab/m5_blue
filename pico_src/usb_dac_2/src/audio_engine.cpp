@@ -359,8 +359,3 @@ void audio_engine_set_synth_gate(bool pressed) {
 AudioEngineStats audio_engine_stats() {
     return AudioEngineStats{g_loops.load(std::memory_order_relaxed), g_usb_short_frames.load(std::memory_order_relaxed)};
 }
-
-JoystickProbeLog audio_engine_joystick_log() {
-    const JoystickProbeStatus st = g_joystick2.status();
-    return JoystickProbeLog{st.ok, st.fw, st.last_write, st.last_read, st.attempts, st.last_try_ms, st.ok_at_ms};
-}

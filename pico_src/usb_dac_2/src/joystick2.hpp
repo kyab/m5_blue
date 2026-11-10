@@ -7,19 +7,6 @@
 #include "hardware/i2c.h"
 #include "pico/stdlib.h"
 
-// Snapshot of the Joystick2 probe. Core1 updates it; core0 prints it.
-// last_write / last_read are byte counts, or PICO_ERROR_GENERIC (-1, NACK or no device)
-// / PICO_ERROR_TIMEOUT (-2). A read code of kReadNotStarted means the write did not complete.
-struct JoystickProbeStatus {
-    bool ok;
-    uint8_t fw;
-    int last_write;
-    int last_read;
-    uint32_t attempts;
-    uint32_t last_try_ms;
-    uint32_t ok_at_ms;
-};
-
 // M5Stack Unit Joystick2 (U024-V2) over Pico I2C.
 // Protocol matches M5Unit-Joystick2 / m5_blue src/main.cpp.
 class Joystick2 {
@@ -32,7 +19,6 @@ class Joystick2 {
     static constexpr uint8_t kOffsetAdc12Reg = 0x50;
     static constexpr uint8_t kFirmwareVersionReg = 0xFE;
     static constexpr uint kI2cHz = 100000;
-    static constexpr int kReadNotStarted = -99;
     // One attempt. A retry loop on core0 blocks the USB audio drain.
     static constexpr uint8_t kI2cRetries = 1;
     // Whole-transfer budget. A 100 kHz button+axes read is about 1.1 ms; this still caps a stuck bus.
@@ -49,21 +35,22 @@ class Joystick2 {
         ok_.store(false, std::memory_order_relaxed);
     }
 
-    bool probe() { return probe_firmware(); }
+    bool probe() {
+        uint8_t fw = 0;
+        const uint8_t reg = kFirmwareVersionReg;
+        const int wrote = i2c_write_timeout_us(kI2c, kAddr, &reg, 1, true, kI2cTimeoutUs);
+        if (wrote != 1) {
+            return false;
+        }
+        const int got = i2c_read_timeout_us(kI2c, kAddr, &fw, 1, false, kI2cTimeoutUs);
+        if (got != 1) {
+            return false;
+        }
+        ok_.store(true, std::memory_order_relaxed);
+        return true;
+    }
 
     bool ok() const { return ok_.load(std::memory_order_relaxed); }
-
-    JoystickProbeStatus status() const {
-        JoystickProbeStatus st;
-        st.ok = ok_.load(std::memory_order_relaxed);
-        st.fw = fw_.load(std::memory_order_relaxed);
-        st.last_write = last_write_.load(std::memory_order_relaxed);
-        st.last_read = last_read_.load(std::memory_order_relaxed);
-        st.attempts = attempts_.load(std::memory_order_relaxed);
-        st.last_try_ms = last_try_ms_.load(std::memory_order_relaxed);
-        st.ok_at_ms = ok_at_ms_.load(std::memory_order_relaxed);
-        return st;
-    }
 
     bool readButton(uint8_t* button_out) {
         for (uint8_t attempt = 0; attempt < kI2cRetries; attempt++) {
@@ -105,35 +92,6 @@ class Joystick2 {
 
   private:
     std::atomic<bool> ok_{false};
-    std::atomic<uint8_t> fw_{0};
-    std::atomic<int> last_write_{0};
-    std::atomic<int> last_read_{kReadNotStarted};
-    std::atomic<uint32_t> attempts_{0};
-    std::atomic<uint32_t> last_try_ms_{0};
-    std::atomic<uint32_t> ok_at_ms_{0};
-
-    bool probe_firmware() {
-        uint8_t fw = 0;
-        const uint8_t reg = kFirmwareVersionReg;
-        const int wrote = i2c_write_timeout_us(kI2c, kAddr, &reg, 1, true, kI2cTimeoutUs);
-        int got = kReadNotStarted;
-        bool success = false;
-        if (wrote == 1) {
-            got = i2c_read_timeout_us(kI2c, kAddr, &fw, 1, false, kI2cTimeoutUs);
-            success = got == 1;
-        }
-        last_write_.store(wrote, std::memory_order_relaxed);
-        last_read_.store(got, std::memory_order_relaxed);
-        attempts_.fetch_add(1, std::memory_order_relaxed);
-        last_try_ms_.store(to_ms_since_boot(get_absolute_time()), std::memory_order_relaxed);
-        if (success) {
-            fw_.store(fw, std::memory_order_relaxed);
-            uint32_t expected = 0;
-            ok_at_ms_.compare_exchange_strong(expected, last_try_ms_.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            ok_.store(true, std::memory_order_relaxed);
-        }
-        return success;
-    }
 
     bool readBytes(uint8_t reg, uint8_t* buffer, uint8_t length) {
         int wrote = i2c_write_timeout_us(kI2c, kAddr, &reg, 1, true, kI2cTimeoutUs);
