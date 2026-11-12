@@ -1,20 +1,22 @@
 # usb_dac_2
 
-Pico 2 W firmware that shows up on the host as a USB audio output (UAC1, 48 kHz / 16-bit stereo, headphones terminal), a USB MIDI output, and a CDC serial port. Audio is played through a Pimoroni Pico Audio Pack (I2S), mixed with a sine synth that runs independently of USB. Host USB audio can also be processed with the same DJ Filter and Freezer used by `pico_src/first` DJ mode.
+Pico 2 W firmware that shows up on the host as a USB audio output (UAC1, 48 kHz / 16-bit stereo, headphones terminal), a USB MIDI output, a Consumer Control HID (play/pause and next track), and a CDC serial port. Audio is played through a Pimoroni Pico Audio Pack (I2S), mixed with a sine synth that runs independently of USB. Host USB audio can also be processed with the same DJ Filter and Freezer used by `pico_src/first` DJ mode.
 
 ## Hardware
 
 | Part | Pins |
 |---|---|
 | Pimoroni Pico Audio Pack (I2S) | DATA = GP9, BCK = GP10, LRCK = GP11 (MUTE / GP22 is left alone) |
-| M5Stack Dual Button unit | Red = GP6, Blue = GP7 (active low, external pull-up) |
+| M5Stack Dual Button unit | Red = GP6, Blue = GP7 (active low, external pull-up). MIDI notes and the synth. |
+| M5Stack Dual Button unit | Red = GP12, Blue = GP13 (active low, external pull-up). Host play/pause and next track. |
 | M5Stack Unit Joystick2 | Red = 3V3, Black = GND, Yellow (SCL) = GP5, White (SDA) = GP4 (I2C0, addr `0x63`, 100 kHz, Pico internal pull-ups) |
 
 ## Behavior
 
 - **USB Audio**: the host stream goes Freezer → DJ Filter, then mixes with the Dual Button synth. Host volume and mute apply to the whole output (USB audio + synth). Range is -50 dB to 0 dB in 1 dB steps.
 - **Joystick2** (same mapping as `pico_src/first` DJ mode): X = DJ Filter, Y = Freezer grain (1000–5000 samples), Z = Freezer gate. Core1 polls it every 8 ms at 100 kHz with a 1.5 ms I2C timeout. Core0 only runs USB and the Dual Button; a blocking read on that core was stalling the USB audio drain. Core0 sets up I2C and does not probe. On a cold USB insert the stick does not ACK during the first few hundred milliseconds (probes before that returned NACK). Core1 probes at 500 ms, then every 200 ms until it reads the firmware version. Until that succeeds, the filter stays at bypass and Freezer stays off.
-- **USB MIDI** (device to host only): both buttons send C4 (note 60) note on / off on channel 1, velocity 100.
+- **USB MIDI** (device to host only): the GP6/GP7 buttons send C4 (note 60) note on / off on channel 1, velocity 100.
+- **USB HID** (Consumer Control): GP13 down/up is Play/Pause (`0x00CD`), GP12 down/up is Scan Next Track (`0x00B5`). The report is two button bits. These buttons do not send MIDI notes and do not trigger the synth.
 - **Synth**: the blue button triggers the `Synth` at C4 while it is held. It plays whether or not the host is streaming.
 - **CDC**: `printf` output once per second (FIFO level, overflow / underrun counters, core1 loop rate). Opening the port at 1200 baud reboots into BOOTSEL.
 
@@ -24,7 +26,8 @@ Pico 2 W firmware that shows up on the host as a USB audio output (UAC1, 48 kHz 
 src/main.cpp          core0 loop: tud_task, USB audio hand-off, MIDI RX drain, 2 ms Dual Button poll, status print
 src/usb_audio.cpp     UAC1 callbacks, volume/mute, TinyUSB FIFO -> hand-off ring
 src/audio_engine.cpp  core1: I2S, 8 ms Joystick2 poll, Freezer + DJ Filter on USB, synth, mix, master gain
-src/usb_midi.cpp      Dual Button poll + note on/off; MIDI RX drain
+src/usb_midi.cpp      GP6/GP7 poll + note on/off; MIDI RX drain
+src/usb_media.cpp     GP12/GP13 poll + Consumer Control HID report
 src/spsc_ring.h       lock-free ring between core0 and core1
 src/Synth.hpp         copied from ../first with kSampleRateHz = 48000
 src/DJFilter.hpp      copied from ../first with _fs = 48000
@@ -109,3 +112,4 @@ The scan flags 5 ms silence more than 20 dB below the median, sample steps above
 5. A MIDI monitor shows C4 note on / off from both buttons.
 6. `core1 loops/s` stays at about 1000.
 7. With Joystick2 connected, host playback responds to X (filter), Y (grain), and Z (Freezer gate); Dual Button blue still triggers C4 with or without USB audio.
+8. GP13 press starts or pauses host playback; GP12 press skips to the next track. Releasing the button sends key up. Neither button sends a MIDI note or triggers the synth.

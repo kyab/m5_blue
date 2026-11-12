@@ -35,6 +35,7 @@ add_executable(usb_dac_2
     src/usb_descriptors.c
     src/usb_audio.cpp
     src/usb_midi.cpp
+    src/usb_media.cpp
     src/audio_engine.cpp
 )
 

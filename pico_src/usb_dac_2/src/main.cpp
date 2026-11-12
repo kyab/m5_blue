@@ -4,6 +4,7 @@
 #include "pico/stdlib.h"
 #include "tusb.h"
 #include "usb_audio.h"
+#include "usb_media.h"
 #include "usb_midi.h"
 
 namespace {
@@ -35,6 +36,7 @@ int main() {
 
     usb_audio_init();
     usb_midi_init();
+    usb_media_init();
     audio_engine_init();
     audio_engine_start();
 
@@ -49,6 +51,7 @@ int main() {
         if (now_ms - last_button_ms >= kButtonPollMs) {
             last_button_ms = now_ms;
             usb_midi_poll_buttons();
+            usb_media_poll_buttons();
         }
         if (now_ms - last_status_ms >= kStatusIntervalMs) {
             last_status_ms = now_ms;

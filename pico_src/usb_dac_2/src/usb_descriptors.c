@@ -3,6 +3,7 @@
 #include "pico/unique_id.h"
 #include "tusb.h"
 #include "usb_descriptors.h"
+#include "usb_media.h"
 
 #define USB_VID 0xCafe
 #define USB_PID 0x4A02
@@ -14,6 +15,10 @@
 #define EPNUM_CDC_NOTIF 0x03
 #define EPNUM_CDC_OUT 0x04
 #define EPNUM_CDC_IN 0x04
+#define EPNUM_HID_IN 0x05
+
+#define HID_EP_SIZE 16
+#define HID_EP_INTERVAL 5
 
 #define MIDI_EP_SIZE 64
 #define CDC_EP_SIZE 64
@@ -39,7 +44,7 @@ uint8_t const* tud_descriptor_device_cb(void) {
     return (uint8_t const*)&desc_device;
 }
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_AUDIO10_HEADPHONES_STEREO_FB_DESC_LEN + TUD_MIDI_DESC_IAD_LEN + TUD_MIDI_DESC_LEN + TUD_CDC_DESC_LEN)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_AUDIO10_HEADPHONES_STEREO_FB_DESC_LEN + TUD_MIDI_DESC_IAD_LEN + TUD_MIDI_DESC_LEN + TUD_CDC_DESC_LEN + TUD_HID_DESC_LEN)
 
 enum {
     STRID_LANGID = 0,
@@ -49,6 +54,25 @@ enum {
     STRID_AUDIO,
     STRID_MIDI,
     STRID_CDC,
+    STRID_HID,
+};
+
+// Bit 0 is Play/Pause (GP13). Bit 1 is Scan Next Track (GP12). The other bits are padding.
+static uint8_t const desc_hid_report[] = {
+    HID_USAGE_PAGE(HID_USAGE_PAGE_CONSUMER),
+    HID_USAGE(HID_USAGE_CONSUMER_CONTROL),
+    HID_COLLECTION(HID_COLLECTION_APPLICATION),
+    HID_USAGE(HID_USAGE_CONSUMER_PLAY_PAUSE),
+    HID_USAGE(HID_USAGE_CONSUMER_SCAN_NEXT_TRACK),
+    HID_LOGICAL_MIN(0),
+    HID_LOGICAL_MAX(1),
+    HID_REPORT_SIZE(1),
+    HID_REPORT_COUNT(2),
+    HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),
+    HID_REPORT_SIZE(6),
+    HID_REPORT_COUNT(1),
+    HID_INPUT(HID_CONSTANT),
+    HID_COLLECTION_END,
 };
 
 static uint8_t const desc_configuration[] = {
@@ -57,6 +81,7 @@ static uint8_t const desc_configuration[] = {
     TUD_MIDI_DESC_IAD(ITF_NUM_MIDI_CONTROL, 0x02, STRID_MIDI),
     TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI_CONTROL, STRID_MIDI, EPNUM_MIDI_OUT, EPNUM_MIDI_IN | 0x80, MIDI_EP_SIZE),
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, STRID_CDC, EPNUM_CDC_NOTIF | 0x80, CDC_NOTIF_EP_SIZE, EPNUM_CDC_OUT, EPNUM_CDC_IN | 0x80, CDC_EP_SIZE),
+    TUD_HID_DESCRIPTOR(ITF_NUM_HID, STRID_HID, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID_IN | 0x80, HID_EP_SIZE, HID_EP_INTERVAL),
 };
 
 TU_VERIFY_STATIC(sizeof(desc_configuration) == CONFIG_TOTAL_LEN, "Incorrect configuration descriptor size");
@@ -74,7 +99,29 @@ static char const* const string_desc_arr[] = {
     "Pico USB DAC",
     "Pico USB DAC MIDI",
     "Pico USB DAC Serial",
+    "Pico USB DAC Media",
 };
+
+uint8_t const* tud_hid_descriptor_report_cb(uint8_t instance) {
+    (void)instance;
+    return desc_hid_report;
+}
+
+uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
+    (void)instance;
+    (void)report_id;
+    if (report_type != HID_REPORT_TYPE_INPUT || reqlen < 1) return 0;
+    buffer[0] = usb_media_buttons();
+    return 1;
+}
+
+void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
+    (void)instance;
+    (void)report_id;
+    (void)report_type;
+    (void)buffer;
+    (void)bufsize;
+}
 
 static uint16_t desc_str[32 + 1];
 
