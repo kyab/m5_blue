@@ -7,9 +7,9 @@ Pico 2 W firmware that shows up on the host as a USB audio output (UAC1, 48 kHz 
 | Part | Pins |
 |---|---|
 | Pimoroni Pico Audio Pack (I2S) | DATA = GP9, BCK = GP10, LRCK = GP11 (MUTE / GP22 is left alone) |
-| M5Stack Dual Button unit | Red = GP6, Blue = GP7 (active low, external pull-up). MIDI notes and the synth. |
-| M5Stack Dual Button unit | Red = GP12, Blue = GP13 (active low, external pull-up). Host play/pause and next track. |
-| M5Stack Dual Button unit | Red = GP14, Blue = GP15 (active low, external pull-up). Host volume down and volume up. |
+| Dual Button 1 (M5Stack Dual Button unit) | Red = GP6, Blue = GP7 (active low, external pull-up). MIDI notes and the synth. |
+| Dual Button 2 (M5Stack Dual Button unit) | Red = GP12, Blue = GP13 (active low, external pull-up). Host play/pause and next track. |
+| Dual Button 3 (M5Stack Dual Button unit) | Red = GP14, Blue = GP15 (active low, external pull-up). Host volume down and volume up. |
 | M5Stack Unit Joystick2 | Red = 3V3, Black = GND, Yellow (SCL) = GP5, White (SDA) = GP4 (I2C0, addr `0x63`, 100 kHz, Pico internal pull-ups) |
 
 ## Behavior
